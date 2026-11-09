@@ -1,0 +1,39 @@
+[project]
+name = "stock-manager-api"
+version = "0.1.0"
+description = "API for the Perishable Stock Manager"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "fastapi>=0.162.2",
+    "psycopg[binary]>=3.3.8",
+    "pydantic-settings>=2.16.2",
+    "sqlalchemy>=2.1.8",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16.0",
+    "hypothesis>=6.170.15",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[tool.uv]
+# An app, not a library: uv installs the dependencies but doesn't build a package.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets tests import the app package from api/.
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# pycodestyle, Pyflakes, isort, flake8-bugbear, pyupgrade
+select = ["E", "F", "I", "B", "UP"]

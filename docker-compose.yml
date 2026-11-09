@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (copy .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (copy .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env (copy .env.example)}
+    ports:
+      # Localhost only: the database is not reachable from other machines.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # postgres:18 keeps its data under /var/lib/postgresql/18/docker, so the
+      # volume goes on /var/lib/postgresql, not /var/lib/postgresql/data.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

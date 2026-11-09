@@ -12,7 +12,7 @@ Keep it this simple, and ask before adding a dependency or a service.
 
 - API in `api/`: Python 3.13 managed with uv, FastAPI served by uvicorn, SQLAlchemy 2 with synchronous sessions and plain `def` endpoints (no async database code), psycopg 3 (`psycopg[binary]`), Alembic, pydantic-settings for config
 - Database: PostgreSQL 18 (`postgres:18` image) in Docker Compose, service `db`
-- Tests: pytest, Hypothesis, and httpx for FastAPI's TestClient. Lint and format: Ruff
+- Tests: pytest, Hypothesis, and httpx2 for FastAPI's TestClient. Lint and format: Ruff
 - CI: GitHub Actions on `ubuntu-latest` with a Postgres 18 service, running Ruff check, Ruff format check and pytest
 - Later: React + TypeScript + Vite dashboard in `web/` (week 3), Expo app in `mobile/` (week 4)
 
@@ -22,7 +22,7 @@ Keep it this simple, and ask before adding a dependency or a service.
 - Everything must work on Windows and in Linux CI. Write any helper script in Python and run it with `uv run`; no `.sh` or `.ps1` scripts.
 - When you give Yazan commands to run, put one command per line and don't chain them with `&&`, because Windows PowerShell 5.1 doesn't support it.
 - Line endings are LF everywhere (`.gitattributes`).
-- In development only Postgres runs in Docker. The API runs directly on Windows and reads `DATABASE_URL` from `.env` (host `localhost`). The API and dashboard services join `docker-compose.yml` in week 4, for the one-command demo.
+- In development only Postgres runs in Docker. The API runs directly on Windows and reads `DATABASE_URL` from `.env` (host `127.0.0.1`, not `localhost`: Postgres is published on IPv4 loopback only, and Windows resolves `localhost` to `::1` first, where the connection hangs). The API and dashboard services join `docker-compose.yml` in week 4, for the one-command demo.
 - The `postgres:18` image keeps its data under `/var/lib/postgresql/18/docker`. Mount the named volume at `/var/lib/postgresql`, never at `/var/lib/postgresql/data`, which breaks on 18.
 
 ## Commands
