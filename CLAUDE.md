@@ -22,7 +22,7 @@ Keep it this simple, and ask before adding a dependency or a service.
 - Everything must work on Windows and in Linux CI. Write any helper script in Python and run it with `uv run`; no `.sh` or `.ps1` scripts.
 - When you give Yazan commands to run, put one command per line and don't chain them with `&&`, because Windows PowerShell 5.1 doesn't support it.
 - Line endings are LF everywhere (`.gitattributes`).
-- In development only Postgres runs in Docker. The API runs directly on Windows and reads `DATABASE_URL` from `.env` (host `localhost`). The API and dashboard services join `docker-compose.yml` in week 4, for the one-command demo.
+- In development only Postgres runs in Docker. The API runs directly on Windows and reads `DATABASE_URL` from `.env` (host `127.0.0.1`, not `localhost`: Postgres is published on IPv4 loopback only, and Windows resolves `localhost` to `::1` first, where the connection hangs). The API and dashboard services join `docker-compose.yml` in week 4, for the one-command demo.
 - The `postgres:18` image keeps its data under `/var/lib/postgresql/18/docker`. Mount the named volume at `/var/lib/postgresql`, never at `/var/lib/postgresql/data`, which breaks on 18.
 
 ## Commands
