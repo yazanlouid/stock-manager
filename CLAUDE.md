@@ -12,7 +12,7 @@ Keep it this simple, and ask before adding a dependency or a service.
 
 - API in `api/`: Python 3.13 managed with uv, FastAPI served by uvicorn, SQLAlchemy 2 with synchronous sessions and plain `def` endpoints (no async database code), psycopg 3 (`psycopg[binary]`), Alembic, pydantic-settings for config
 - Database: PostgreSQL 18 (`postgres:18` image) in Docker Compose, service `db`
-- Tests: pytest, Hypothesis, and httpx for FastAPI's TestClient. Lint and format: Ruff
+- Tests: pytest, Hypothesis, and httpx2 for FastAPI's TestClient. Lint and format: Ruff
 - CI: GitHub Actions on `ubuntu-latest` with a Postgres 18 service, running Ruff check, Ruff format check and pytest
 - Later: React + TypeScript + Vite dashboard in `web/` (week 3), Expo app in `mobile/` (week 4)
 
