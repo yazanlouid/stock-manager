@@ -1,6 +1,6 @@
 # Perishable Stock Manager — Core Schema
 
-Author: Yazan Louid · Last updated: 7 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
+Author: Yazan Louid · Last updated: 9 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
 
 ## Design principles
 
@@ -10,8 +10,8 @@ The ledger is the single source of truth: every other stock number is derived fr
 - **Locations from day 1:** stock rows carry `location_id` even though each demo business has one location. Adding it to a ledger later means rewriting history.
 - **Append-only ledger:** `stock_movements` accepts inserts only. A mistake is fixed with a reversal row, never an edit.
 - **Units:** every quantity is stored in the item's base unit (g, ml or piece) as numeric(14,3). Pack units convert at entry. No floats.
-- **Money:** numeric(14,3) with a currency per business; three decimals fit Jordanian fils. Unit cost lives on the batch, so waste and usage are valued at what was actually paid.
-- **Time and IDs:** timestamptz throughout. Movements carry `occurred_at`, `recorded_at` and a client-generated UUID; keys are UUIDv7 (built into Postgres 18). Together these make offline sync additive later.
+- **Money:** numeric(14,3) with a currency per business; three decimals fit Jordanian fils. The one exception is `unit_cost`, which is per base unit and numeric(18,6) on batches, movements and receipt lines, because a pack price spread over thousands of grams needs more decimals. Receipt lines also keep `pack_price` as invoiced, in numeric(14,3). Unit cost lives on the batch, so waste and usage are valued at what was actually paid.
+- **Time and IDs:** timestamptz throughout. A movement's `occurred_at` is when the event happened, set by the caller, and `created_at` is when the server wrote it. Each request sends a client-generated `client_id`, shared by every movement it writes, and numbers those movements with `client_seq` (0, 1, 2…). Keys are UUIDv7 (built into Postgres 18). Together these make offline sync additive later.
 
 ## Tables
 
@@ -27,15 +27,17 @@ The ledger is the single source of truth: every other stock number is derived fr
 | Catalogue | suppliers | Who you buy from | name, phone, lead_time_days |
 | Catalogue | supplier_items | What each supplier sells | supplier_id, item_id, item_unit_id, pack_price, is_preferred |
 | Stock | batches | A received lot | location_id, item_id, expires_on, lot_code, unit_cost, received_at, is_default |
-| Stock | stock_movements | The ledger | location_id, item_id, batch_id, qty_delta, type, source, reason, unit_cost, ref_type, ref_id, reverses_id, occurred_at, recorded_at, user_id, client_id |
+| Stock | stock_movements | The ledger | location_id, item_id, batch_id, qty_delta, type, source, reason, unit_cost, receipt_line_id, reverses_id, occurred_at, user_id, client_id, client_seq |
 | Stock | stock_balances | On-hand per batch (projection) | batch_id, location_id, item_id, qty_on_hand, last_movement_at |
-| Documents | receipts, receipt_lines | Goods in | location_id, supplier_id, po_id, invoice_ref · item_id, item_unit_id, qty_packs, qty_base, unit_cost, expires_on, lot_code, batch_id |
+| Documents | receipts, receipt_lines | Goods in | location_id, supplier_id, received_at, invoice_ref (po_id in week 2) · item_id, item_unit_id, qty_packs, qty_base, pack_price, unit_cost, expires_on, lot_code, batch_id |
 | Documents | stock_counts, stock_count_lines | Stocktakes | location_id, status, submitted_at · item_id, batch_id, expected_qty, counted_qty |
 | Rules | par_levels | Reorder rule per item and location | location_id, item_id, reorder_point, order_up_to |
 | Rules | purchase_orders, purchase_order_lines | Draft orders | location_id, supplier_id, status, origin · item_id, item_unit_id, qty_packs, suggested_packs |
 | Rules | alerts | Open issues | location_id, item_id, batch_id, type, status, raised_at, resolved_at |
 
 Enums: movement type is receive, usage, waste, count_adjust, settle or reversal. Movement source is manual, count or simulator; recipe, pos and invoice come later. Waste reason is expired, spoiled, damaged, prep_error, overproduction or other. Alert type is low_stock, expiring, expired or negative_stock. Waste needs no table of its own: it is a movement with type waste and a reason.
+
+A movement links to the document that caused it through a nullable foreign key per document type: `receipt_line_id` for receives now, and `stock_count_line_id` the same way in week 2. Every batch has a `received_at`; a default batch takes the time it was created. `occurred_at` and both `received_at` columns have no default, because the simulator replays past days.
 
 ## Domain rules
 
@@ -54,11 +56,11 @@ Eight rules keep the ledger honest; rules 1 to 7 each become a property-based te
 
 The database enforces every rule it can, so an API bug cannot corrupt the ledger.
 
-- **Append-only:** UPDATE and DELETE on `stock_movements` are revoked from the app role, and a trigger rejects them for everyone else.
-- **Checks:** `qty_delta` ≠ 0, and its sign matches the type (receive > 0; usage and waste < 0). Also `factor_to_base` > 0 and `reorder_point` ≤ `order_up_to`.
-- **Uniqueness:** (`business_id`, `client_id`) on `stock_movements` makes retries idempotent; `reverses_id` is unique.
+- **Append-only:** a trigger on `stock_movements` rejects UPDATE, DELETE and TRUNCATE. The trigger alone enforces it: the app connects as a superuser, so revoking privileges would have no effect. A non-superuser app role arrives with row-level security, before any pilot.
+- **Checks:** `qty_delta` ≠ 0, and its sign matches the type (receive > 0; usage and waste < 0). `reason` is set for waste and only for waste; `reverses_id` is set if and only if the type is reversal; `receipt_line_id` is set if and only if the type is receive. Also `factor_to_base` > 0 and `reorder_point` ≤ `order_up_to`.
+- **Uniqueness:** (`business_id`, `client_id`, `client_seq`) on `stock_movements` makes retries idempotent; `reverses_id` and `receipt_line_id` are unique.
 - **Partial unique indexes:** one default batch per (`location_id`, `item_id`); one draft order per (`location_id`, `supplier_id`); one open alert per (`type`, `item_id`, `batch_id`), using NULLS NOT DISTINCT.
-- **Indexes:** a FEFO index on batches (`location_id`, `item_id`, `expires_on` NULLS LAST, `received_at`); `stock_movements` on (`business_id`, `item_id`, `occurred_at`) for history and reports; `stock_balances` on (`location_id`, `item_id`).
+- **Indexes:** a FEFO index on batches (`location_id`, `item_id`, `expires_on`, `received_at`), where ascending order already puts no expiry last; `stock_movements` on (`business_id`, `item_id`, `occurred_at`) for history and reports; `stock_balances` on (`location_id`, `item_id`).
 - **Row-level security:** off in v1; the API scopes every query by the `business_id` in the token. Turn it on before any real tenant: it costs a session setting per request and makes debugging slower now.
 
 ## Deferred tables

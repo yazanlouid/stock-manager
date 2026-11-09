@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.main import app
+from tests.builders import Catalogue, Stock, build_catalogue, build_stock
 
 API_DIR = Path(__file__).resolve().parents[1]
 TEST_DB_NAME = "stock_test"
@@ -97,3 +98,27 @@ def client(db_session: Session) -> Iterator[TestClient]:
             yield test_client
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def cat(db_session: Session) -> Catalogue:
+    """One business with one row in every tenancy and catalogue table."""
+    return build_catalogue(db_session)
+
+
+@pytest.fixture
+def other(db_session: Session) -> Catalogue:
+    """A second business, for cross-tenant tests."""
+    return build_catalogue(db_session)
+
+
+@pytest.fixture
+def stock(db_session: Session, cat: Catalogue) -> Stock:
+    """Batches, a receipt, a movement and a balance for cat's item."""
+    return build_stock(db_session, cat)
+
+
+@pytest.fixture
+def other_stock(db_session: Session, other: Catalogue) -> Stock:
+    """The same stock rows in the second business."""
+    return build_stock(db_session, other)

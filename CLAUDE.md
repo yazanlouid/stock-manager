@@ -49,7 +49,7 @@ If a command stops matching the code, fix the code or update this section in the
 1. `stock_movements` is append-only. Never UPDATE or DELETE its rows, in code, migrations or tests, and never disable its trigger. Fix mistakes with a reversal movement.
 2. `stock_balances` is a projection. Write it in the same transaction as the movement. It must always equal the sum of its batch's movements, and a rebuild from the ledger must match exactly (domain rule 1).
 3. Domain functions never commit. The API request, the simulator or the test owns the transaction.
-4. Quantities are in the item's base unit (g, ml or piece) as numeric(14,3), and money is numeric(14,3). Use `Decimal` in Python, never floats.
+4. Quantities are in the item's base unit (g, ml or piece) as numeric(14,3), and money is numeric(14,3), except `unit_cost`, which is per base unit and numeric(18,6) (the `UnitCost` type in `app/models/columns.py`). Use `Decimal` in Python, never floats.
 5. Every table has `business_id` and every query is scoped by it. Stock rows also carry `location_id`.
 6. FEFO order is `expires_on` ascending with no date last, then `received_at`. Skip expired batches. A shortfall posts to the item's default batch, which may go negative; the negative-stock alert arrives with the alerts work in week 2. See domain rules 2–5 in `docs/schema.md`.
 7. Every movement has a `type` and a `source` (manual, count or simulator). Recipes are out of scope for v1: don't add products, recipe or sales tables.
