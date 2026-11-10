@@ -9,12 +9,10 @@ usage movement per allocation, in the order returned.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from uuid import UUID
 
-# Quantities are numeric(14,3): three decimal places.
-QUANTITY_STEP = Decimal("0.001")
-ZERO = Decimal(0)
+from app.domain.checks import ZERO, check_quantity
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +55,7 @@ def allocate_usage(batches: Sequence[BatchSnapshot], quantity: Decimal, as_of: d
     id. Whatever they can't cover goes to the default batch, last, even if that
     takes it negative.
     """
-    _check_quantity(quantity)
+    check_quantity(quantity)
     default = _default_batch(batches)
 
     usable = sorted(
@@ -92,25 +90,6 @@ def _fefo_key(batch: BatchSnapshot) -> tuple[bool, date, datetime, UUID]:
 
 def _not_expired(batch: BatchSnapshot, as_of: date) -> bool:
     return batch.expires_on is None or batch.expires_on >= as_of
-
-
-def _check_quantity(quantity: Decimal) -> None:
-    if not isinstance(quantity, Decimal):
-        raise TypeError(f"quantity must be a Decimal, not {type(quantity).__name__}")
-    # Check finiteness first: Decimal("NaN") > 0 raises InvalidOperation, and
-    # Decimal("Infinity") > 0 is True.
-    if not quantity.is_finite():
-        raise ValueError(f"quantity must be finite, got {quantity}")
-    if quantity <= 0:
-        raise ValueError(f"quantity must be positive, got {quantity}")
-    try:
-        on_step = quantity == quantity.quantize(QUANTITY_STEP)
-    except InvalidOperation:
-        # quantize raises when the result needs more digits than the context
-        # precision (28), far beyond numeric(14,3).
-        on_step = False
-    if not on_step:
-        raise ValueError(f"quantity must have at most three decimal places, got {quantity}")
 
 
 def _default_batch(batches: Sequence[BatchSnapshot]) -> BatchSnapshot:
