@@ -791,3 +791,106 @@ def reverse(
             reverses_id=original.id,
         )
     return MovementsResult(tuple(ledger.movements), replayed=False)
+
+
+# --- Rebuild balances -----------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceDifference:
+    """A batch whose stock_balances row doesn't match its movements.
+
+    expected_* come from the ledger. actual_* are None when the batch has no
+    balance row at all.
+    """
+
+    batch_id: UUID
+    expected_qty: Decimal
+    actual_qty: Decimal | None
+    expected_last_movement_at: datetime | None
+    actual_last_movement_at: datetime | None
+
+
+def rebuild_balances(
+    session: Session, business_id: UUID, *, fix: bool = False
+) -> list[BalanceDifference]:
+    """Recompute every batch's balance from the ledger and return the differences.
+
+    qty_on_hand is the sum of the batch's movements and last_movement_at their
+    latest occurred_at (domain rule 1); a batch with no movements has 0 and
+    NULL. With fix=True the balance rows are overwritten (or created) to match.
+    A fix locks every balance row of the business, so run it while nothing else
+    is writing stock.
+    """
+    if fix:
+        session.execute(
+            select(StockBalance.id)
+            .where(StockBalance.business_id == business_id)
+            .order_by(StockBalance.batch_id)
+            .with_for_update()
+        )
+
+    ledger = (
+        select(
+            StockMovement.batch_id,
+            func.sum(StockMovement.qty_delta).label("qty"),
+            func.max(StockMovement.occurred_at).label("last_movement_at"),
+        )
+        .where(StockMovement.business_id == business_id)
+        .group_by(StockMovement.batch_id)
+        .subquery()
+    )
+    expected_qty = func.coalesce(ledger.c.qty, 0)
+    rows = session.execute(
+        select(
+            Batch.id,
+            Batch.location_id,
+            Batch.item_id,
+            expected_qty,
+            StockBalance.qty_on_hand,
+            ledger.c.last_movement_at,
+            StockBalance.last_movement_at,
+            StockBalance.id,
+        )
+        .select_from(Batch)
+        .outerjoin(ledger, ledger.c.batch_id == Batch.id)
+        .outerjoin(
+            StockBalance,
+            (StockBalance.business_id == Batch.business_id) & (StockBalance.batch_id == Batch.id),
+        )
+        .where(
+            Batch.business_id == business_id,
+            # IS DISTINCT FROM treats NULLs as values, so a missing balance row
+            # or a NULL last_movement_at on one side only is a difference.
+            StockBalance.qty_on_hand.is_distinct_from(expected_qty)
+            | StockBalance.last_movement_at.is_distinct_from(ledger.c.last_movement_at),
+        )
+        .order_by(Batch.id)
+    ).all()
+
+    differences = []
+    for batch_id, location_id, item_id, qty, actual_qty, last, actual_last, balance_id in rows:
+        differences.append(BalanceDifference(batch_id, qty, actual_qty, last, actual_last))
+        if not fix:
+            continue
+        if balance_id is None:
+            session.add(
+                StockBalance(
+                    business_id=business_id,
+                    location_id=location_id,
+                    item_id=item_id,
+                    batch_id=batch_id,
+                    qty_on_hand=qty,
+                    last_movement_at=last,
+                )
+            )
+        else:
+            session.execute(
+                update(StockBalance)
+                .where(StockBalance.id == balance_id)
+                .values(qty_on_hand=qty, last_movement_at=last)
+                .execution_options(synchronize_session="fetch")
+            )
+    if fix:
+        session.flush()
+    return differences
