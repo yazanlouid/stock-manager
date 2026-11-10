@@ -44,8 +44,8 @@ A movement links to the document that caused it through a nullable foreign key p
 Eight rules keep the ledger honest; rules 1 to 7 each become a property-based test in week 1. Rules 3 and 4 are decisions D12 and D13 in [decisions.md](decisions.md).
 
 1. **Balance invariant:** a batch's `qty_on_hand` always equals the sum of its movements. Both are written in one transaction, and a full rebuild from the ledger must match exactly.
-2. **FEFO:** usage draws from the location's batches ordered by `expires_on` (no date last), then `received_at`, locked with SELECT … FOR UPDATE. One usage can split into one movement per batch.
-3. **Expired stock is skipped:** FEFO never draws from a batch past its expiry date. The batch stays on hand with an expired alert until someone wastes it.
+2. **FEFO:** usage draws from the location's batches ordered by `expires_on` (no date last), then `received_at`, then `id`, locked with SELECT … FOR UPDATE. The default batch always comes last and takes whatever remains. One usage can split into one movement per batch.
+3. **Expired stock is skipped:** FEFO never draws from a batch past its expiry date: a batch is usable on its expiry date and skipped from the next day. The batch stays on hand with an expired alert until someone wastes it.
 4. **Negative stock is allowed, and flagged:** a shortfall posts to the item's default batch, which goes negative and raises an alert. The next receipt settles it first with a settle pair (out of the new batch, into the default batch). Blocking usage because a delivery wasn't logged is worse than a visible gap.
 5. **One code path:** every item has exactly one default batch per location, with no expiry. Items without batch tracking only ever use it.
 6. **Corrections:** a reversal posts the negated quantity with `reverses_id` set. Each movement can be reversed once.
