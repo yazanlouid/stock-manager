@@ -452,6 +452,32 @@ def test_reversing_a_waste_restores_the_batch(db_session: Session, cat: Catalogu
     assert_reconciled(db_session, cat)
 
 
+def test_a_reversal_keeps_its_original_cost(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+) -> None:
+    item, sack = flour
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"))  # 0.000500 per g
+    usage = do_use(db_session, cat, item, "10000")
+    # 15000 g left at 0.000500, plus 25000 g at 0.000800:
+    # (15000 × 0.000500 + 25000 × 0.000800) / 40000 = 0.0006875, rounded half up.
+    do_receive(db_session, cat, line(item, sack, "1", "20.000"))
+    default = default_batch(db_session, cat, item)
+    assert default.unit_cost == d("0.000688")
+
+    result = do_reverse(db_session, cat, usage.movements[0].client_id)
+
+    (original,) = usage.movements
+    (reversal,) = result.movements
+    assert original.unit_cost == d("0.000500")
+    # The usage's cost, not the batch's cost now (D34).
+    assert (reversal.qty_delta, reversal.unit_cost) == (d("10000"), d("0.000500"))
+    assert original.qty_delta * original.unit_cost + reversal.qty_delta * reversal.unit_cost == 0
+    # A reversal doesn't change the batch's cost.
+    assert default_batch(db_session, cat, item).unit_cost == d("0.000688")
+    assert on_hand(db_session, default.id) == d("50000")
+    assert_reconciled(db_session, cat)
+
+
 def test_a_request_can_be_reversed_only_once(db_session: Session, cat: Catalogue) -> None:
     do_receive(db_session, cat, milk(cat, "1"))
     usage = do_use(db_session, cat, cat.item, "100")
