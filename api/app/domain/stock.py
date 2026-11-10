@@ -712,3 +712,82 @@ def waste(
     ledger = _Ledger(session, business_id, client_id, source, user_id)
     ledger.post(batch, -quantity, "waste", batch.unit_cost, occurred_at, reason=reason)
     return MovementsResult(tuple(ledger.movements), replayed=False)
+
+
+# --- Reverse --------------------------------------------------------------------
+
+REVERSIBLE_TYPES = frozenset({"usage", "waste"})
+
+
+def reverse(
+    session: Session,
+    business_id: UUID,
+    *,
+    original_client_id: UUID,
+    client_id: UUID,
+    source: str,
+    user_id: UUID | None = None,
+) -> MovementsResult:
+    """Reverse every movement of one usage or waste request (D34, domain rule 6).
+
+    Each reversal posts the negated quantity to the same batch, with reverses_id
+    set and the original's unit_cost and occurred_at, so each pair nets to zero
+    in quantity and value, and period reports net out. created_at still shows
+    when the correction was made. Receipts, settles and reversals can't be
+    reversed, and a request can be reversed only once.
+    """
+    _check_source(source)
+
+    # A retried reversal returns what it wrote, rather than "already reversed".
+    replayed = _replay(session, business_id, client_id, {"reversal"})
+    if replayed is not None:
+        return MovementsResult(replayed, replayed=True)
+
+    _check_user(session, business_id, user_id)
+    originals = tuple(
+        session.scalars(
+            select(StockMovement)
+            .where(
+                StockMovement.business_id == business_id,
+                StockMovement.client_id == original_client_id,
+            )
+            .order_by(StockMovement.client_seq)
+        )
+    )
+    if not originals:
+        raise DomainError(f"no request with client_id {original_client_id}")
+    types = {m.type for m in originals}
+    if not types <= REVERSIBLE_TYPES:
+        raise DomainError(f"only usage and waste can be reversed, not {', '.join(sorted(types))}")
+
+    defaults = _lock_defaults(session, business_id, ((m.location_id, m.item_id) for m in originals))
+    batches = {b.id: b for b in defaults.values()}
+    other_ids = {m.batch_id for m in originals} - batches.keys()
+    if other_ids:
+        for batch in _lock_batches(session, business_id, Batch.id.in_(other_ids)):
+            batches[batch.id] = batch
+
+    # Checked after locking, so two reversals of the same request take turns and
+    # the second sees the first. The unique key on reverses_id is the backstop.
+    already = session.scalar(
+        select(StockMovement.id)
+        .where(
+            StockMovement.business_id == business_id,
+            StockMovement.reverses_id.in_([m.id for m in originals]),
+        )
+        .limit(1)
+    )
+    if already is not None:
+        raise DomainError(f"request {original_client_id} was already reversed")
+
+    ledger = _Ledger(session, business_id, client_id, source, user_id)
+    for original in originals:
+        ledger.post(
+            batches[original.batch_id],
+            -original.qty_delta,
+            "reversal",
+            original.unit_cost,
+            original.occurred_at,
+            reverses_id=original.id,
+        )
+    return MovementsResult(tuple(ledger.movements), replayed=False)
