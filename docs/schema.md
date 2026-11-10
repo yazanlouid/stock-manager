@@ -1,6 +1,6 @@
 # Perishable Stock Manager — Core Schema
 
-Author: Yazan Louid · Last updated: 9 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
+Author: Yazan Louid · Last updated: 10 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
 
 ## Design principles
 
@@ -35,7 +35,7 @@ The ledger is the single source of truth: every other stock number is derived fr
 | Rules | purchase_orders, purchase_order_lines | Draft orders | location_id, supplier_id, status, origin · item_id, item_unit_id, qty_packs, suggested_packs |
 | Rules | alerts | Open issues | location_id, item_id, batch_id, type, status, raised_at, resolved_at |
 
-Enums: movement type is receive, usage, waste, count_adjust, settle or reversal. Movement source is manual, count or simulator; recipe, pos and invoice come later. Waste reason is expired, spoiled, damaged, prep_error, overproduction or other. Alert type is low_stock, expiring, expired or negative_stock. Waste needs no table of its own: it is a movement with type waste and a reason.
+Enums: movement type is receive, usage, waste, count_adjust, settle or reversal. Movement source is manual, count or simulator; recipe, pos and invoice come later. Waste reason is expired, spoiled, damaged, prep_error, overproduction or other. Alert type is low_stock, expiring, expired or negative_stock. Waste needs no table of its own: it is a movement with type waste and a reason. Waste names the batch it comes from (an item without batch tracking uses its default batch) and can't exceed that batch's on-hand.
 
 A movement links to the document that caused it through a nullable foreign key per document type: `receipt_line_id` for receives now, and `stock_count_line_id` the same way in week 2. Every batch has a `received_at`; a default batch takes the time it was created. `occurred_at` and both `received_at` columns have no default, because the simulator replays past days.
 
@@ -45,11 +45,11 @@ Eight rules keep the ledger honest; rules 1 to 7 each become a property-based te
 
 1. **Balance invariant:** a batch's `qty_on_hand` always equals the sum of its movements. Both are written in one transaction, and a full rebuild from the ledger must match exactly.
 2. **FEFO:** usage draws from the location's batches ordered by `expires_on` (no date last), then `received_at`, then `id`, locked with SELECT … FOR UPDATE. The default batch always comes last and takes whatever remains. One usage can split into one movement per batch.
-3. **Expired stock is skipped:** FEFO never draws from a batch past its expiry date: a batch is usable on its expiry date and skipped from the next day. The batch stays on hand with an expired alert until someone wastes it.
+3. **Expired stock is skipped:** FEFO never draws from a batch past its expiry date: a batch is usable on its expiry date and skipped from the next day. The date is the usage's `occurred_at` in the business's timezone, converted in Postgres. The batch stays on hand with an expired alert until someone wastes it.
 4. **Negative stock is allowed, and flagged:** a shortfall posts to the item's default batch, which goes negative and raises an alert. The next receipt settles it first with a settle pair (out of the new batch, into the default batch). Blocking usage because a delivery wasn't logged is worse than a visible gap.
 5. **One code path:** every item has exactly one default batch per location, with no expiry. Items without batch tracking only ever use it.
-6. **Corrections:** a reversal posts the negated quantity with `reverses_id` set. Each movement can be reversed once.
-7. **Valuation:** each movement copies its batch's `unit_cost`, so waste and usage reports never join back to receipts.
+6. **Corrections:** a reversal posts the negated quantity with `reverses_id` set. Each movement can be reversed once. v1 reverses whole usage and waste requests: every movement of the request, each copying its original's `unit_cost` and `occurred_at`, so the pair nets to zero in quantity and value. Receipts (with their settle movements) and reversals can't be reversed.
+7. **Valuation:** each movement copies its batch's `unit_cost`, so waste and usage reports never join back to receipts. A default batch's cost is the weighted average of what it holds: a receive sets it to (on_hand × cost + qty × line cost) / (on_hand + qty), and when on_hand ≤ 0 or the cost is unknown, the line's cost replaces it (D35).
 8. **Draft orders:** when usable on-hand (not expired) falls to `reorder_point`, add a line to that supplier's one open draft: `order_up_to` minus on-hand minus quantity already on order, rounded up to whole packs.
 
 ## Constraints and indexes
