@@ -2,138 +2,33 @@
 
 Each rejected insert runs in a savepoint (session.begin_nested()), so the test's
 outer transaction stays usable. We check the name of the constraint Postgres
-reports, so a test only passes when the intended constraint fired.
+reports, so a test only passes when the intended constraint fired. The row
+builders and the cat and other fixtures are in builders.py and conftest.py.
 """
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
 from sqlalchemy import inspect
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.models import Business, Item, ItemUnit, Location, Supplier, SupplierItem, User
-
-# --- Row builders: valid by default, overridden per test ---------------------
-
-
-def new_business(**overrides: Any) -> Business:
-    values = {"name": "Test Café", "currency": "JOD", "timezone": "Asia/Amman"}
-    return Business(**(values | overrides))
-
-
-def new_location(business_id: uuid.UUID, **overrides: Any) -> Location:
-    values = {"business_id": business_id, "name": "Main branch", "kind": "branch"}
-    return Location(**(values | overrides))
-
-
-def new_user(business_id: uuid.UUID, **overrides: Any) -> User:
-    values = {
-        "business_id": business_id,
-        "email": f"{uuid.uuid4().hex}@example.com",
-        "name": "Test Owner",
-        "role": "owner",
-        "password_hash": "not-a-real-hash",
-    }
-    return User(**(values | overrides))
-
-
-def new_item(business_id: uuid.UUID, **overrides: Any) -> Item:
-    values = {
-        "business_id": business_id,
-        "sku": f"SKU-{uuid.uuid4().hex[:8]}",
-        "name": "Whole milk",
-        "base_unit": "ml",
-    }
-    return Item(**(values | overrides))
-
-
-def new_unit(item: Item, **overrides: Any) -> ItemUnit:
-    values = {
-        "business_id": item.business_id,
-        "item_id": item.id,
-        "name": "bottle",
-        "factor_to_base": Decimal("1000"),
-    }
-    return ItemUnit(**(values | overrides))
-
-
-def new_supplier(business_id: uuid.UUID, **overrides: Any) -> Supplier:
-    values = {"business_id": business_id, "name": "Dairy Co"}
-    return Supplier(**(values | overrides))
-
-
-def new_supplier_item(
-    supplier: Supplier, item: Item, unit: ItemUnit, **overrides: Any
-) -> SupplierItem:
-    values = {
-        "business_id": supplier.business_id,
-        "supplier_id": supplier.id,
-        "item_id": item.id,
-        "item_unit_id": unit.id,
-        "pack_price": Decimal("0.850"),
-    }
-    return SupplierItem(**(values | overrides))
-
-
-@dataclass
-class Catalogue:
-    """One business with one row in every tenancy and catalogue table."""
-
-    business: Business
-    location: Location
-    user: User
-    item: Item
-    unit: ItemUnit
-    supplier: Supplier
-    supplier_item: SupplierItem
-
-
-def add(session: Session, row: Base) -> Any:
-    session.add(row)
-    session.flush()  # Sends the INSERT, so the server-generated id is available.
-    return row
-
-
-def build_catalogue(session: Session) -> Catalogue:
-    business = add(session, new_business())
-    item = add(session, new_item(business.id, tracks_batches=True, tracks_expiry=True))
-    unit = add(session, new_unit(item))
-    supplier = add(session, new_supplier(business.id))
-    return Catalogue(
-        business=business,
-        location=add(session, new_location(business.id)),
-        user=add(session, new_user(business.id)),
-        item=item,
-        unit=unit,
-        supplier=supplier,
-        supplier_item=add(session, new_supplier_item(supplier, item, unit, is_preferred=True)),
-    )
-
-
-@pytest.fixture
-def cat(db_session: Session) -> Catalogue:
-    return build_catalogue(db_session)
-
-
-@pytest.fixture
-def other(db_session: Session) -> Catalogue:
-    """A second business, for cross-tenant tests."""
-    return build_catalogue(db_session)
-
-
-def assert_rejected(session: Session, row: Base, constraint: str) -> None:
-    with pytest.raises(IntegrityError) as exc_info:
-        with session.begin_nested():
-            add(session, row)
-    assert exc_info.value.orig.diag.constraint_name == constraint
-
+from tests.builders import (
+    Catalogue,
+    add,
+    assert_rejected,
+    new_business,
+    new_item,
+    new_location,
+    new_supplier,
+    new_supplier_item,
+    new_unit,
+    new_user,
+)
 
 # --- Valid rows ---------------------------------------------------------------
 
