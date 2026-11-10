@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.checks import check_money, check_quantity
 from app.domain.errors import DomainError
+from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.models import (
     Batch,
     Item,
@@ -69,6 +70,19 @@ class ReceiveResult:
     replayed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class UseResult:
+    """One usage movement per batch drawn, in FEFO order, and the shortfall.
+
+    shortfall > 0 means the default batch went (further) negative by that much.
+    It is None for a replay, which returns the movements without recomputing it.
+    """
+
+    movements: tuple[StockMovement, ...]
+    shortfall: Decimal | None
+    replayed: bool
+
+
 # --- Batches, locks and the ledger writer ---------------------------------------
 
 
@@ -84,6 +98,11 @@ class _BatchState:
     is_default: bool
     unit_cost: Decimal | None
     on_hand: Decimal
+
+    def snapshot(self) -> BatchSnapshot:
+        return BatchSnapshot(
+            self.id, self.expires_on, self.received_at, self.on_hand, self.is_default
+        )
 
 
 def _ensure_default_batch(
@@ -536,3 +555,80 @@ def receive(
             ledger.post(default, settle_qty, "settle", plan.unit_cost, received_at)
 
     return ReceiveResult(receipt, tuple(ledger.movements), replayed=False)
+
+
+# --- Use ------------------------------------------------------------------------
+
+
+def _local_date(session: Session, business_id: UUID, occurred_at: datetime) -> date:
+    """occurred_at's date in the business's timezone, computed by Postgres (D32).
+
+    Postgres has its own timezone database, so the date doesn't depend on the
+    machine the API runs on.
+    """
+    local_date = session.scalar(
+        text(
+            "SELECT (CAST(:occurred_at AS timestamptz) AT TIME ZONE timezone)::date"
+            " FROM businesses WHERE id = :business_id"
+        ),
+        {"occurred_at": occurred_at, "business_id": business_id},
+    )
+    if local_date is None:
+        raise DomainError(f"business {business_id} not found")
+    return local_date
+
+
+def use(
+    session: Session,
+    business_id: UUID,
+    *,
+    location_id: UUID,
+    item_id: UUID,
+    quantity: Decimal,
+    occurred_at: datetime,
+    client_id: UUID,
+    source: str,
+    user_id: UUID | None = None,
+) -> UseResult:
+    """Use quantity of an item at a location, drawing batches earliest expiry first.
+
+    allocate_usage (fefo.py) decides the split (domain rules 2 to 5), skipping
+    batches that expired before occurred_at's local date (rule 3). Each usage
+    movement copies its batch's current unit_cost (rule 7), which is NULL for a
+    default batch that has never received anything.
+    """
+    check_quantity(quantity)
+    _check_timestamp(occurred_at, "occurred_at")
+    _check_source(source)
+
+    replayed = _replay(session, business_id, client_id, {"usage"})
+    if replayed is not None:
+        return UseResult(replayed, shortfall=None, replayed=True)
+
+    as_of = _local_date(session, business_id, occurred_at)
+    _get(session, Location, business_id, location_id, "location")
+    _get(session, Item, business_id, item_id, "item")
+    _check_user(session, business_id, user_id)
+
+    default = _lock_defaults(session, business_id, [(location_id, item_id)])[(location_id, item_id)]
+    # Batches with nothing on hand can't be drawn, so they needn't be locked.
+    # Non-default batches never go negative, so on_hand > 0 skips only empty ones.
+    batches = [
+        default,
+        *_lock_batches(
+            session,
+            business_id,
+            Batch.location_id == location_id,
+            Batch.item_id == item_id,
+            ~Batch.is_default,
+            StockBalance.qty_on_hand > 0,
+        ),
+    ]
+    result = allocate_usage([b.snapshot() for b in batches], quantity, as_of)
+
+    by_id = {b.id: b for b in batches}
+    ledger = _Ledger(session, business_id, client_id, source, user_id)
+    for allocation in result.allocations:
+        batch = by_id[allocation.batch_id]
+        ledger.post(batch, -allocation.quantity, "usage", batch.unit_cost, occurred_at)
+    return UseResult(tuple(ledger.movements), result.shortfall, replayed=False)
