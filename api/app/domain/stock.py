@@ -37,6 +37,9 @@ from app.models import (
 )
 
 SOURCES = frozenset({"manual", "count", "simulator"})
+WASTE_REASONS = frozenset(
+    {"expired", "spoiled", "damaged", "prep_error", "overproduction", "other"}
+)
 
 # unit_cost is numeric(18,6) (the UnitCost column type).
 UNIT_COST_STEP = Decimal("0.000001")
@@ -80,6 +83,14 @@ class UseResult:
 
     movements: tuple[StockMovement, ...]
     shortfall: Decimal | None
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MovementsResult:
+    """The movements a waste or a reversal wrote, in client_seq order."""
+
+    movements: tuple[StockMovement, ...]
     replayed: bool
 
 
@@ -632,3 +643,72 @@ def use(
         batch = by_id[allocation.batch_id]
         ledger.post(batch, -allocation.quantity, "usage", batch.unit_cost, occurred_at)
     return UseResult(tuple(ledger.movements), result.shortfall, replayed=False)
+
+
+# --- Waste ----------------------------------------------------------------------
+
+
+def waste(
+    session: Session,
+    business_id: UUID,
+    *,
+    location_id: UUID,
+    item_id: UUID,
+    batch_id: UUID | None,
+    quantity: Decimal,
+    reason: str,
+    occurred_at: datetime,
+    client_id: UUID,
+    source: str,
+    user_id: UUID | None = None,
+) -> MovementsResult:
+    """Waste quantity from one named batch, at that batch's cost (D33).
+
+    A batch-tracked item must name the batch. An item without batch tracking
+    wastes from its default batch, so batch_id is None or that batch's id.
+    Expired batches can be wasted (that is how they leave stock), but waste
+    can't exceed the batch's on-hand, so it never takes a batch negative.
+    """
+    check_quantity(quantity)
+    _check_timestamp(occurred_at, "occurred_at")
+    _check_source(source)
+    if reason not in WASTE_REASONS:
+        raise DomainError(
+            f"reason must be one of {', '.join(sorted(WASTE_REASONS))}, got {reason!r}"
+        )
+
+    replayed = _replay(session, business_id, client_id, {"waste"})
+    if replayed is not None:
+        return MovementsResult(replayed, replayed=True)
+
+    _get(session, Location, business_id, location_id, "location")
+    item = _get(session, Item, business_id, item_id, "item")
+    _check_user(session, business_id, user_id)
+
+    default = _lock_defaults(session, business_id, [(location_id, item_id)])[(location_id, item_id)]
+    if batch_id is None or batch_id == default.id:
+        if batch_id is None and item.tracks_batches:
+            raise DomainError(f"item {item.sku} tracks batches, so name the batch to waste")
+        batch = default
+    elif not item.tracks_batches:
+        raise DomainError(
+            f"item {item.sku} doesn't track batches, so waste comes from its default batch"
+        )
+    else:
+        found = _lock_batches(
+            session,
+            business_id,
+            Batch.location_id == location_id,
+            Batch.item_id == item_id,
+            Batch.id == batch_id,
+        )
+        if not found:
+            raise DomainError(f"batch {batch_id} not found for item {item.sku} at this location")
+        batch = found[0]
+
+    if quantity > batch.on_hand:
+        raise DomainError(f"can't waste {quantity}: the batch has {batch.on_hand} on hand")
+
+    ledger = _Ledger(session, business_id, client_id, source, user_id)
+    ledger.post(batch, -quantity, "waste", batch.unit_cost, occurred_at, reason=reason)
+    return MovementsResult(tuple(ledger.movements), replayed=False)
