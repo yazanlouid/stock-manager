@@ -55,6 +55,11 @@ From `api/`:
 | Tests | `uv run pytest` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
+| Fresh demo data (asks first, then recreates the schema, seeds and simulates 30 days) | `uv run python -m app.cli reset` |
+| Seed and simulate into an empty database | `uv run python -m app.cli simulate` |
+| Check the ledger reconciles | `uv run python -m app.cli reconcile` |
+
+`reset` and `simulate` take `--days N`, `--end-date YYYY-MM-DD` and `--random-seed N`. The same seed and end date always give the same data.
 
 Tests use a separate `stock_test` database on the same Postgres. The test setup creates it and applies the migrations, and every test runs in a transaction that is rolled back.
 
