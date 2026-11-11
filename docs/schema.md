@@ -1,6 +1,6 @@
 # Perishable Stock Manager — Core Schema
 
-Author: Yazan Louid · Last updated: 10 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
+Author: Yazan Louid · Last updated: 11 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
 
 ## Design principles
 
@@ -41,7 +41,7 @@ A movement links to the document that caused it through a nullable foreign key p
 
 ## Domain rules
 
-Eight rules keep the ledger honest; rules 1 to 7 each become a property-based test in week 1. Rules 3 and 4 are decisions D12 and D13 in [decisions.md](decisions.md).
+Eight rules keep the ledger honest; rules 1 to 7 have had property-based tests since week 1. In [decisions.md](decisions.md), rule 3 is D13 (refined by D31) and rule 4 is D12.
 
 1. **Balance invariant:** a batch's `qty_on_hand` always equals the sum of its movements. Both are written in one transaction, and a full rebuild from the ledger must match exactly.
 2. **FEFO:** usage draws from the location's batches ordered by `expires_on` (no date last), then `received_at`, then `id`, locked with SELECT … FOR UPDATE. The default batch always comes last and takes whatever remains. One usage can split into one movement per batch.
@@ -61,7 +61,7 @@ The database enforces every rule it can, so an API bug cannot corrupt the ledger
 - **Uniqueness:** (`business_id`, `client_id`, `client_seq`) on `stock_movements` makes retries idempotent; `reverses_id` and `receipt_line_id` are unique.
 - **Partial unique indexes:** one default batch per (`location_id`, `item_id`); one draft order per (`location_id`, `supplier_id`); one open alert per (`type`, `item_id`, `batch_id`), using NULLS NOT DISTINCT.
 - **Indexes:** a FEFO index on batches (`location_id`, `item_id`, `expires_on`, `received_at`), where ascending order already puts no expiry last; `stock_movements` on (`business_id`, `item_id`, `occurred_at`) for history and reports; `stock_balances` on (`location_id`, `item_id`).
-- **Row-level security:** off in v1; the API scopes every query by the `business_id` in the token. Turn it on before any real tenant: it costs a session setting per request and makes debugging slower now.
+- **Row-level security:** off in v1; the API scopes every query by the request's `business_id`, read from the `X-Business-Id` header until demo login (D43) and from the token after that. Turn it on before any real tenant: it costs a session setting per request and makes debugging slower now.
 
 ## Deferred tables
 
