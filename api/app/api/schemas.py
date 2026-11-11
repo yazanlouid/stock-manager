@@ -124,3 +124,40 @@ class ReceiptResponse(MovementsResponse):
 class UsageResponse(MovementsResponse):
     # How far the default batch went negative; null for a replay.
     shortfall: Decimal | None
+
+
+# --- GET /stock ----------------------------------------------------------------
+
+
+class StockBatchOut(BaseModel):
+    """A batch with stock on hand. Quantities are in the item's base unit."""
+
+    id: UUID
+    is_default: bool
+    expires_on: date | None
+    lot_code: str | None
+    received_at: datetime
+    # Negative only for a default batch with an unsettled shortfall.
+    on_hand: Decimal
+    # Per base unit; null for a default batch that has never received anything.
+    unit_cost: Decimal | None
+    # Past its expiry date in the business's timezone; usable on the date itself.
+    expired: bool
+
+
+class StockEntryOut(BaseModel):
+    """One active item at one location."""
+
+    item_id: UUID
+    sku: str
+    item_name: str
+    category: str | None
+    base_unit: str
+    location_id: UUID
+    location_name: str
+    # Sum of every batch, default included, so negative while a shortfall is unsettled.
+    on_hand: Decimal
+    # On-hand in batches past their expiry date.
+    expired: Decimal
+    # Batches with non-zero on-hand, in FEFO order with the default batch last.
+    batches: list[StockBatchOut]
