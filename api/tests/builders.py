@@ -27,6 +27,8 @@ from app.models import (
     Receipt,
     ReceiptLine,
     StockBalance,
+    StockCount,
+    StockCountLine,
     StockMovement,
     Supplier,
     SupplierItem,
@@ -36,6 +38,7 @@ from app.models import (
 # Fixed past times: received_at and occurred_at have no server default.
 RECEIVED_AT = datetime(2026, 11, 2, 7, 30, tzinfo=UTC)
 OCCURRED_AT = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+COUNTED_AT = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
 EXPIRES_ON = date(2026, 11, 9)
 
 # --- Tenancy and catalogue ----------------------------------------------------
@@ -202,6 +205,41 @@ def new_receipt_line(
     return ReceiptLine(**(values | overrides))
 
 
+def new_stock_count(location: Location, **overrides: Any) -> StockCount:
+    values = {
+        "business_id": location.business_id,
+        "location_id": location.id,
+        "counted_at": COUNTED_AT,
+        "client_id": uuid.uuid4(),
+    }
+    return StockCount(**(values | overrides))
+
+
+def new_count_line(count: StockCount, batch: Batch, **overrides: Any) -> StockCountLine:
+    """A line of the count for the batch, counted at what was expected (2000)."""
+    values = {
+        "business_id": count.business_id,
+        "count_id": count.id,
+        "location_id": count.location_id,
+        "item_id": batch.item_id,
+        "batch_id": batch.id,
+        "expected_qty": Decimal("2000"),
+        "counted_qty": Decimal("2000"),
+    }
+    return StockCountLine(**(values | overrides))
+
+
+def new_count_adjust(batch: Batch, line: StockCountLine, **overrides: Any) -> StockMovement:
+    """A count_adjust for a count line, from the given batch."""
+    values = {
+        "type": "count_adjust",
+        "source": "count",
+        "stock_count_line_id": line.id,
+        "occurred_at": COUNTED_AT,
+    }
+    return new_movement(batch, **(values | overrides))
+
+
 # --- Whole datasets -----------------------------------------------------------
 
 
@@ -235,6 +273,10 @@ class Stock:
     balance: StockBalance
     # An item with no batches, so default-batch tests can't collide with default_batch.
     flour: Item
+    # A count at cat.location with a line for batch, counted at what was
+    # expected, so the line needs no count_adjust.
+    count: StockCount
+    count_line: StockCountLine
 
 
 def add(session: Session, row: Base) -> Any:
@@ -262,6 +304,7 @@ def build_catalogue(session: Session) -> Catalogue:
 def build_stock(session: Session, cat: Catalogue) -> Stock:
     batch = add(session, new_batch(cat.location, cat.item))
     receipt = add(session, new_receipt(cat.location, cat.supplier))
+    count = add(session, new_stock_count(cat.location))
     return Stock(
         cat=cat,
         default_batch=add(session, new_default_batch(cat.location, cat.item)),
@@ -271,6 +314,8 @@ def build_stock(session: Session, cat: Catalogue) -> Stock:
         usage=add(session, new_movement(batch)),
         balance=add(session, new_balance(batch)),
         flour=add(session, new_item(cat.business.id, name="Flour", base_unit="g")),
+        count=count,
+        count_line=add(session, new_count_line(count, batch)),
     )
 
 
