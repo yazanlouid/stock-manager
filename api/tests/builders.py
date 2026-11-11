@@ -1,7 +1,8 @@
-"""Row builders and helpers shared by the schema tests.
+"""Row builders, API request bodies and helpers shared by the tests.
 
-Each builder returns a valid, unsaved row; keyword arguments override any column.
-The cat and other fixtures in conftest.py build a whole catalogue with them.
+Each row builder returns a valid, unsaved row; keyword arguments override any
+column. The cat and other fixtures in conftest.py build a whole catalogue with
+them. The *_json builders return API request bodies.
 """
 
 import uuid
@@ -11,6 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import Executable, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -270,6 +272,84 @@ def build_stock(session: Session, cat: Catalogue) -> Stock:
         balance=add(session, new_balance(batch)),
         flour=add(session, new_item(cat.business.id, name="Flour", base_unit="g")),
     )
+
+
+# --- API request bodies -------------------------------------------------------
+#
+# Quantities and prices are passed as strings, as the README tells clients to.
+# jsonable_encoder turns UUIDs, dates and datetimes into JSON strings.
+
+
+def api_headers(business: Business | Catalogue) -> dict[str, str]:
+    """The X-Business-Id header for a business, or for a catalogue's business."""
+    if isinstance(business, Catalogue):
+        business = business.business
+    return {"X-Business-Id": str(business.id)}
+
+
+def receipt_line_json(
+    item: Item,
+    unit: ItemUnit,
+    qty_packs: str,
+    pack_price: str,
+    expires_on: date | None = None,
+    lot_code: str | None = None,
+) -> dict[str, Any]:
+    values = {
+        "item_id": item.id,
+        "item_unit_id": unit.id,
+        "qty_packs": qty_packs,
+        "pack_price": pack_price,
+        "expires_on": expires_on,
+        "lot_code": lot_code,
+    }
+    return jsonable_encoder(values)
+
+
+def receipt_json(cat: Catalogue, lines: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
+    """A receipt from cat's supplier at cat's location, received at RECEIVED_AT."""
+    values = {
+        "client_id": uuid.uuid4(),
+        "location_id": cat.location.id,
+        "supplier_id": cat.supplier.id,
+        "received_at": RECEIVED_AT,
+        "invoice_ref": None,
+        "lines": lines,
+    }
+    return jsonable_encoder(values | overrides)
+
+
+def usage_json(cat: Catalogue, quantity: str, **overrides: Any) -> dict[str, Any]:
+    """A usage of cat's item at cat's location, at OCCURRED_AT."""
+    values = {
+        "client_id": uuid.uuid4(),
+        "location_id": cat.location.id,
+        "item_id": cat.item.id,
+        "quantity": quantity,
+        "occurred_at": OCCURRED_AT,
+    }
+    return jsonable_encoder(values | overrides)
+
+
+def waste_json(
+    cat: Catalogue, quantity: str, batch_id: uuid.UUID | None, **overrides: Any
+) -> dict[str, Any]:
+    """Spoiled waste of cat's item at cat's location, at OCCURRED_AT."""
+    values = {
+        "client_id": uuid.uuid4(),
+        "location_id": cat.location.id,
+        "item_id": cat.item.id,
+        "batch_id": batch_id,
+        "quantity": quantity,
+        "reason": "spoiled",
+        "occurred_at": OCCURRED_AT,
+    }
+    return jsonable_encoder(values | overrides)
+
+
+def reversal_json(original_client_id: uuid.UUID | str, **overrides: Any) -> dict[str, Any]:
+    values = {"client_id": uuid.uuid4(), "original_client_id": original_client_id}
+    return jsonable_encoder(values | overrides)
 
 
 # --- Assertions ---------------------------------------------------------------
