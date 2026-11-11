@@ -392,6 +392,31 @@ def waste_json(
     return jsonable_encoder(values | overrides)
 
 
+def count_item_json(
+    item: Item,
+    counted_qty: str | None = None,
+    batches: list[tuple[uuid.UUID | str, str]] | None = None,
+) -> dict[str, Any]:
+    """An item counted by quantity (no batch tracking) or by its batches found."""
+    values: dict[str, Any] = {"item_id": item.id}
+    if counted_qty is not None:
+        values["counted_qty"] = counted_qty
+    if batches is not None:
+        values["batches"] = [{"batch_id": b, "counted_qty": qty} for b, qty in batches]
+    return jsonable_encoder(values)
+
+
+def count_json(cat: Catalogue, items: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
+    """A count at cat's location, at COUNTED_AT."""
+    values = {
+        "client_id": uuid.uuid4(),
+        "location_id": cat.location.id,
+        "counted_at": COUNTED_AT,
+        "items": items,
+    }
+    return jsonable_encoder(values | overrides)
+
+
 def reversal_json(original_client_id: uuid.UUID | str, **overrides: Any) -> dict[str, Any]:
     values = {"client_id": uuid.uuid4(), "original_client_id": original_client_id}
     return jsonable_encoder(values | overrides)
