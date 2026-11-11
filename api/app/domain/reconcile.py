@@ -11,7 +11,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.domain.stock import rebuild_balances
-from app.models import Batch, Item, ReceiptLine, StockMovement
+from app.models import Batch, Item, ReceiptLine, StockCountLine, StockMovement
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +19,8 @@ class Problem:
     """One way the ledger fails to reconcile.
 
     kind is one of balance_mismatch, negative_batch, default_batch_count,
-    receipt_line_unposted or receipt_line_mismatch.
+    receipt_line_unposted, receipt_line_mismatch, count_line_unposted or
+    count_line_mismatch.
     """
 
     kind: str
@@ -33,6 +34,7 @@ def reconcile(session: Session, business_id: UUID) -> list[Problem]:
         *_negative_batches(session, business_id),
         *_default_batch_counts(session, business_id),
         *_receipt_line_problems(session, business_id),
+        *_count_line_problems(session, business_id),
     ]
 
 
@@ -167,6 +169,61 @@ def _receipt_line_problems(session: Session, business_id: UUID) -> list[Problem]
                     "receipt_line_mismatch",
                     f"receipt line {line_id} ({sku}) is {qty_base} at {unit_cost},"
                     f" but its receive movement {movement_id} is {qty_delta} at {movement_cost}",
+                )
+            )
+    return problems
+
+
+def _count_line_problems(session: Session, business_id: UUID) -> list[Problem]:
+    """Each count line whose counted quantity differs from what was expected has a
+    count_adjust of counted minus expected, and a line counted as expected has none.
+    """
+    difference = StockCountLine.counted_qty - StockCountLine.expected_qty
+    rows = session.execute(
+        select(
+            StockCountLine.id,
+            Item.sku,
+            StockCountLine.expected_qty,
+            StockCountLine.counted_qty,
+            StockMovement.id,
+            StockMovement.qty_delta,
+        )
+        .join(
+            Item,
+            and_(Item.business_id == StockCountLine.business_id, Item.id == StockCountLine.item_id),
+        )
+        .outerjoin(
+            StockMovement,
+            and_(
+                StockMovement.business_id == StockCountLine.business_id,
+                StockMovement.stock_count_line_id == StockCountLine.id,
+            ),
+        )
+        .where(
+            StockCountLine.business_id == business_id,
+            or_(
+                and_(StockMovement.id.is_(None), difference != 0),
+                StockMovement.qty_delta != difference,
+            ),
+        )
+        .order_by(StockCountLine.id)
+    ).all()
+    problems = []
+    for line_id, sku, expected, counted, movement_id, qty_delta in rows:
+        if movement_id is None:
+            problems.append(
+                Problem(
+                    "count_line_unposted",
+                    f"count line {line_id} ({sku}) expected {expected} and counted {counted},"
+                    " but has no count_adjust movement",
+                )
+            )
+        else:
+            problems.append(
+                Problem(
+                    "count_line_mismatch",
+                    f"count line {line_id} ({sku}) expected {expected} and counted {counted},"
+                    f" but its count_adjust movement {movement_id} is {qty_delta}",
                 )
             )
     return problems
