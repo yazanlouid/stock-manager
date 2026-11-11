@@ -44,11 +44,31 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine)
 
 
-def get_db() -> Iterator[Session]:
-    """FastAPI dependency: one session per request.
+def commit_or_rollback(session: Session) -> Iterator[Session]:
+    """Yield the session, then commit it, or roll it back if anything raised.
 
-    It never commits. Committing is the caller's job (CLAUDE.md hard rule 3);
-    how endpoints commit is decided in week 1.
+    An exception from the endpoint (or from another dependency) is thrown into
+    this generator at the yield, so it rolls back and re-raises. A commit that
+    raises is rolled back and re-raised too. get_db uses this, and so does the
+    tests' override of get_db.
+    """
+    try:
+        yield session
+        session.commit()
+    except BaseException:
+        session.rollback()
+        raise
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: one session and one transaction per request (D42).
+
+    The API commits here and nowhere else: endpoints and domain functions never
+    commit (hard rule 3). The commit runs when the endpoint returns, and any
+    exception rolls the request back. Endpoints depend on it through DbSession
+    (app/api/deps.py), with scope="function", so the commit runs after the
+    response is serialized but before it is sent: a failed commit is a 500,
+    never a success response for work that wasn't saved.
     """
     with SessionLocal() as session:
-        yield session
+        yield from commit_or_rollback(session)
