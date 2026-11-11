@@ -6,7 +6,8 @@ migrations. Each test then runs inside a transaction that is rolled back, so
 nothing a test writes is kept and ledger rows are never deleted.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,9 @@ from sqlalchemy import URL, Engine, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from app.api.deps import now
 from app.config import get_settings
-from app.db import get_db
+from app.db import commit_or_rollback, get_db
 from app.main import app
 from tests.builders import Catalogue, Stock, build_catalogue, build_stock
 
@@ -89,15 +91,55 @@ def db_session(engine: Engine) -> Iterator[Session]:
             transaction.rollback()
 
 
+def override_get_db(session: Session) -> Callable[[], Iterator[Session]]:
+    """A get_db for the tests: the app's commit-or-rollback, on the test's session.
+
+    Each request first commits the test's setup rows (the cat and stock
+    fixtures, rows a test added). In create_savepoint mode a commit only
+    releases a savepoint, so the outer transaction still rolls back after the
+    test, but without it a request that rolls back would undo the setup too.
+    """
+
+    def get_test_db() -> Iterator[Session]:
+        session.commit()
+        yield from commit_or_rollback(session)
+
+    return get_test_db
+
+
 @pytest.fixture
 def client(db_session: Session) -> Iterator[TestClient]:
-    """A TestClient whose requests use the test's rolled-back session."""
-    app.dependency_overrides[get_db] = lambda: db_session
+    """A TestClient whose requests commit or roll back like the app's, on db_session."""
+    app.dependency_overrides[get_db] = override_get_db(db_session)
     try:
         with TestClient(app) as test_client:
             yield test_client
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def error_client(db_session: Session) -> Iterator[TestClient]:
+    """Like client, but an unhandled error is a 500 response instead of an exception."""
+    app.dependency_overrides[get_db] = override_get_db(db_session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def pin_now() -> Callable[[datetime], None]:
+    """Pin the API's clock (the Now dependency) to a given time.
+
+    The client fixture clears the override after the test.
+    """
+
+    def pin(moment: datetime) -> None:
+        app.dependency_overrides[now] = lambda: moment
+
+    return pin
 
 
 @pytest.fixture

@@ -61,6 +61,8 @@ From `api/`:
 
 `reset` and `simulate` take `--days N`, `--end-date YYYY-MM-DD` and `--random-seed N`. The same seed and end date always give the same data.
 
+To try the API, run it and open http://localhost:8000/docs. Every endpoint except `/health` needs an `X-Business-Id` header: `reconcile` prints each business's id next to its name. `GET /catalogue` lists the location, supplier, item and unit ids the write endpoints take, and `GET /stock` shows on-hand by batch. Send quantities and prices as JSON strings, such as `"2500.5"`. A JSON number is read as a float before it becomes a decimal: that is exact for every value the database stores (up to 15 significant digits), but it could round a longer number.
+
 Tests use a separate `stock_test` database on the same Postgres. The test setup creates it and applies the migrations, and every test runs in a transaction that is rolled back.
 
 CI (GitHub Actions) runs Ruff check, Ruff format check and pytest against Postgres 18 on every pull request and every push to `main`.
