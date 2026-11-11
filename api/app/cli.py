@@ -7,7 +7,8 @@
 reset recreates the schema (Alembic downgrade to base, then upgrade to head)
 after you type yes, then does what simulate does (D37). simulate seeds the café
 and simulates it into a migrated, empty database. reconcile checks every
-business's ledger and exits with 1 if it finds a problem.
+business's ledger and exits with 1 if it finds a problem. It prints each
+business's id, which API requests send in the X-Business-Id header.
 """
 
 import argparse
@@ -174,11 +175,11 @@ def run_reconcile(session_factory: SessionFactory) -> int:
         for business_id, name in businesses:
             problems = reconcile(session, business_id)
             if not problems:
-                print(f"Reconcile {name}: OK")
+                print(f"Reconcile {name} ({business_id}): OK")
                 continue
             found = True
             plural = "" if len(problems) == 1 else "s"
-            print(f"Reconcile {name}: {len(problems)} problem{plural}")
+            print(f"Reconcile {name} ({business_id}): {len(problems)} problem{plural}")
             for problem in problems:
                 print(f"  {problem.kind}: {problem.message}")
     return 1 if found else 0

@@ -43,6 +43,7 @@ From `api/`:
 - Fresh demo data (asks for confirmation, recreates the schema, then seeds and simulates 30 days): `uv run python -m app.cli reset`
 - Seed and simulate into an empty, migrated database: `uv run python -m app.cli simulate`
 - Check every business's ledger: `uv run python -m app.cli reconcile`
+- Try the API: run it, copy a business id from `reconcile`'s output, then send it as the `X-Business-Id` header from http://localhost:8000/docs
 
 If a command stops matching the code, fix the code or update this section in the same change.
 
@@ -50,9 +51,9 @@ If a command stops matching the code, fix the code or update this section in the
 
 1. `stock_movements` is append-only. Never UPDATE or DELETE its rows, in code, migrations or tests, and never disable its trigger. Fix mistakes with a reversal movement.
 2. `stock_balances` is a projection. Write it in the same transaction as the movement. It must always equal the sum of its batch's movements, and a rebuild from the ledger must match exactly (domain rule 1).
-3. Domain functions never commit. The API request, the simulator or the test owns the transaction.
+3. Domain functions never commit. The API request, the simulator or the test owns the transaction. The API commits in `get_db` (D42), when the endpoint returns, and rolls back when it raises; endpoints never commit.
 4. Quantities are in the item's base unit (g, ml or piece) as numeric(14,3), and money is numeric(14,3), except `unit_cost`, which is per base unit and numeric(18,6) (the `UnitCost` type in `app/models/columns.py`). Use `Decimal` in Python, never floats.
-5. Every table has `business_id` and every query is scoped by it. Stock rows also carry `location_id`.
+5. Every table has `business_id` and every query is scoped by it. Stock rows also carry `location_id`. Endpoints take `business_id` only from the `CurrentBusiness` dependency (D43), never from a body or path.
 6. FEFO order is `expires_on` ascending with no date last, then `received_at`, then `id`; the default batch always comes last and takes whatever remains. Skip expired batches. A shortfall posts to the item's default batch, which may go negative; the negative-stock alert arrives with the alerts work in week 2. See domain rules 2–5 in `docs/schema.md`.
 7. Every movement has a `type` and a `source` (manual, count or simulator). Recipes are out of scope for v1: don't add products, recipe or sales tables.
 8. Timestamps are timestamptz. Primary keys default to Postgres 18's `uuidv7()`.

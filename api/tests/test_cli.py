@@ -87,19 +87,26 @@ def test_simulate_refuses_a_database_that_already_has_a_business(
     assert db_session.scalar(select(func.count()).select_from(Business)) == 1
 
 
-def test_simulate_seeds_simulates_and_reconciles(session_factory, capsys):
+def test_simulate_seeds_simulates_and_reconciles(session_factory, db_session: Session, capsys):
     args = ["simulate", "--days", "1", "--end-date", "2026-10-31"]
     assert cli.main(args, session_factory) == 0
 
     out = capsys.readouterr().out
     assert "Days: 1, 2026-10-31 to 2026-10-31 (opening stock on 2026-10-30)" in out
     assert "Movements: receive" in out
-    assert "Reconcile Dar Zaatar Café: OK" in out
+    business_id = db_session.scalar(select(Business.id))
+    assert f"Reconcile Dar Zaatar Café ({business_id}): OK" in out
 
 
-def test_reconcile_exits_zero_when_every_ledger_reconciles(session_factory, cat, capsys):
+def test_reconcile_exits_zero_and_prints_each_business_id(
+    session_factory, cat: Catalogue, other: Catalogue, capsys
+):
     assert cli.main(["reconcile"], session_factory) == 0
-    assert "Reconcile Test Café: OK" in capsys.readouterr().out
+
+    out = capsys.readouterr().out
+    # Both businesses are called Test Café, so each line is told apart by its id.
+    assert f"Reconcile Test Café ({cat.business.id}): OK" in out
+    assert f"Reconcile Test Café ({other.business.id}): OK" in out
 
 
 def test_reconcile_exits_one_and_prints_each_problem(
@@ -110,7 +117,7 @@ def test_reconcile_exits_one_and_prints_each_problem(
 
     assert cli.main(["reconcile"], session_factory) == 1
     out = capsys.readouterr().out
-    assert "Reconcile Test Café: 1 problem\n" in out
+    assert f"Reconcile Test Café ({cat.business.id}): 1 problem\n" in out
     assert "default_batch_count:" in out
 
 
