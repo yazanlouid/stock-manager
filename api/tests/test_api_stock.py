@@ -349,6 +349,49 @@ def test_a_write_sent_twice_is_replayed(
     assert movement_count(db_session) == count
 
 
+# --- Response timestamps are UTC -----------------------------------------------
+#
+# A first response is built from the rows the request just wrote, which hold
+# the client's datetimes with their offset; a replay or a reversal reads them
+# back from Postgres. Both are written in UTC, so they match byte for byte.
+
+
+def test_a_receipt_sent_with_an_offset_replays_byte_for_byte(client: TestClient, cat: Catalogue):
+    body = receipt_json(cat, [milk_line(cat, "1")], received_at="2026-11-02T10:30:00+03:00")
+
+    first = post(client, "/receipts", body, cat)
+    again = post(client, "/receipts", body, cat)
+
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert first.json()["receipt"]["received_at"] == "2026-11-02T07:30:00Z"
+    assert first.json()["movements"][0]["occurred_at"] == "2026-11-02T07:30:00Z"
+    # The bodies differ only in replayed.
+    expected = first.content.replace(b'"replayed":false', b'"replayed":true')
+    assert again.content == expected
+
+
+def test_a_usage_sent_with_an_offset_replays_and_reverses_with_the_same_time(
+    client: TestClient, cat: Catalogue
+):
+    body = usage_json(cat, "500", occurred_at="2026-11-02T15:00:00+03:00")
+
+    first = post(client, "/usage", body, cat)
+    again = post(client, "/usage", body, cat)
+    reversal = post(client, "/reversals", reversal_json(body["client_id"]), cat)
+
+    assert (first.status_code, again.status_code, reversal.status_code) == (201, 200, 201)
+    (move,) = first.json()["movements"]
+    assert move["occurred_at"] == "2026-11-02T12:00:00Z"
+    assert move["created_at"].endswith("Z")
+    # The bodies differ only in replayed and the shortfall, which a replay doesn't recompute.
+    expected = first.content.replace(
+        b'"replayed":false,"shortfall":"500.000"', b'"replayed":true,"shortfall":null'
+    )
+    assert again.content == expected
+    # A reversal copies its original's occurred_at.
+    assert [m["occurred_at"] for m in reversal.json()["movements"]] == [move["occurred_at"]]
+
+
 # --- Timestamps (D46) -----------------------------------------------------------
 
 

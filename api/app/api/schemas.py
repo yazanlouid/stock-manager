@@ -10,20 +10,33 @@ Response Decimals are written at their column's scale: quantities and money
 with three decimals ("-300.000"), unit costs with six. A response built from
 rows the request just wrote holds the Decimals Python computed ("-300"),
 while a replay reads them back from Postgres ("-300.000"); fixing the scale
-makes both the same. Every value already fits its column, so nothing rounds.
+makes both the same. Every value already fits its column, so nothing should
+round; at_scale raises rather than round one that doesn't.
+
+Response timestamps are written in UTC ("2026-11-02T12:00:00Z"), for the same
+reason: a first response holds the client's datetime with its offset
+("+03:00"), while a replay or a reversal reads it back from Postgres.
 """
 
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import UTC, date, datetime
+from decimal import Context, Decimal, Inexact, InvalidOperation
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, PlainSerializer
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, PlainSerializer
+
+# Traps instead of rounding: Inexact when a non-zero digit would be dropped,
+# InvalidOperation when the result needs more digits than the precision.
+_EXACT = Context(traps=[Inexact, InvalidOperation])
+
+
+def at_scale(value: Decimal, places: int) -> str:
+    """value as a string with exactly that many decimals; raises if that would round it."""
+    return str(value.quantize(Decimal(1).scaleb(-places), context=_EXACT))
 
 
 def _at_scale(places: int) -> PlainSerializer:
-    step = Decimal(1).scaleb(-places)
-    return PlainSerializer(lambda value: str(value.quantize(step)), return_type=str)
+    return PlainSerializer(lambda value: at_scale(value, places), return_type=str)
 
 
 # numeric(14,3): quantities in base units, pack prices and factor_to_base.
@@ -31,6 +44,9 @@ Quantity = Annotated[Decimal, _at_scale(3)]
 Money = Annotated[Decimal, _at_scale(3)]
 # numeric(18,6): cost per base unit.
 UnitCost = Annotated[Decimal, _at_scale(6)]
+
+# A timestamp converted to UTC, which pydantic writes with a Z.
+Timestamp = Annotated[datetime, AfterValidator(lambda value: value.astimezone(UTC))]
 
 
 class RequestModel(BaseModel):
@@ -110,19 +126,19 @@ class MovementOut(ResponseModel):
     unit_cost: UnitCost | None
     receipt_line_id: UUID | None
     reverses_id: UUID | None
-    occurred_at: datetime
+    occurred_at: Timestamp
     client_id: UUID
     client_seq: int
-    created_at: datetime
+    created_at: Timestamp
 
 
 class ReceiptOut(ResponseModel):
     id: UUID
     location_id: UUID
     supplier_id: UUID
-    received_at: datetime
+    received_at: Timestamp
     invoice_ref: str | None
-    created_at: datetime
+    created_at: Timestamp
 
 
 class MovementsResponse(ResponseModel):
@@ -155,7 +171,7 @@ class StockBatchOut(BaseModel):
     is_default: bool
     expires_on: date | None
     lot_code: str | None
-    received_at: datetime
+    received_at: Timestamp
     # Negative only for a default batch with an unsettled shortfall.
     on_hand: Quantity
     # Per base unit; null for a default batch that has never received anything.
