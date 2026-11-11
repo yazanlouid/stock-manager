@@ -9,7 +9,7 @@ end by checking that the balances still match the ledger (domain rule 1).
 
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.counts import BatchCountInput, CountItemInput, CountResult, count_stock
 from app.domain.errors import DomainError
+from app.domain.stock import receive
 from app.models import Batch, Item, ItemUnit, StockCount
 from tests.builders import Catalogue, add, new_batch, new_location
 from tests.test_stock import (
@@ -30,6 +31,7 @@ from tests.test_stock import (
     do_receive,
     do_reverse,
     do_use,
+    do_waste,
     line,
     milk,
     movement_count,
@@ -476,3 +478,178 @@ def test_counts_are_scoped_to_the_business(
     assert db_session.scalar(
         select(Batch.business_id).where(Batch.id == result.lines[0].batch_id)
     ) == (other.business.id)
+
+
+# --- The count barrier (D51) ----------------------------------------------------
+
+ONE_SECOND = timedelta(seconds=1)
+
+
+def test_a_count_must_be_dated_at_or_after_the_latest_movement_of_any_batch(
+    db_session: Session, cat: Catalogue
+) -> None:
+    a, b = (
+        do_receive(db_session, cat, milk(cat, "1", expires_day=day), received_at=nov(10, hour))
+        .movements[0]
+        .batch_id
+        for day, hour in ((12, 7), (15, 8))
+    )
+    # Empties A, the earlier expiry, so the item's latest movement is on a
+    # batch that no longer has stock.
+    do_use(db_session, cat, cat.item, "1000", occurred_at=nov(10, 10))
+    found = tracked(cat.item, (b, "1000"))
+
+    with pytest.raises(DomainError, match="has a movement at 2026-11-10T10:00:00Z"):
+        do_count(db_session, cat, found, counted_at=nov(10, 9))
+    result = do_count(db_session, cat, found, counted_at=nov(10, 10))
+
+    assert lines_of(result) == [(b, d("1000"), d("1000")), (default_of(db_session, cat), 0, 0)]
+    assert on_hand(db_session, a) == 0
+    assert_reconciled(db_session, cat)
+
+
+def test_a_second_count_must_be_dated_after_the_first(db_session: Session, cat: Catalogue) -> None:
+    do_count(db_session, cat, tracked(cat.item))
+
+    with pytest.raises(DomainError, match="last counted at 2026-11-10T20:00:00Z"):
+        do_count(db_session, cat, tracked(cat.item))
+    do_count(db_session, cat, tracked(cat.item), counted_at=COUNT_AT + ONE_SECOND)
+
+
+def default_of(db: Session, cat: Catalogue) -> UUID:
+    return default_batch(db, cat, cat.item).id
+
+
+@pytest.fixture
+def counted(db_session: Session, cat: Catalogue) -> tuple[UUID, UUID]:
+    """Milk received on 2 Nov, a usage at exactly COUNT_AT, then the count.
+
+    Returns the milk batch and the usage's client_id.
+    """
+    (received,) = do_receive(db_session, cat, milk(cat, "2")).movements
+    at_count = do_use(db_session, cat, cat.item, "100", occurred_at=COUNT_AT)
+    do_count(db_session, cat, tracked(cat.item, (received.batch_id, "1900")))
+    return received.batch_id, at_count.movements[0].client_id
+
+
+def write(db: Session, cat: Catalogue, kind: str, at: datetime, batch_id: UUID) -> None:
+    """A receipt line, a usage or a waste of cat's milk, dated at."""
+    if kind == "receipt":
+        do_receive(db, cat, milk(cat, "1"), received_at=at)
+    elif kind == "usage":
+        do_use(db, cat, cat.item, "1", occurred_at=at)
+    else:
+        do_waste(db, cat, cat.item, batch_id, "1", occurred_at=at)
+
+
+@pytest.mark.parametrize("kind", ["receipt", "usage", "waste"])
+@pytest.mark.parametrize("offset", [timedelta(0), -timedelta(hours=1)], ids=["at", "before"])
+def test_a_write_dated_at_or_before_a_count_is_refused(
+    db_session: Session,
+    cat: Catalogue,
+    counted: tuple[UUID, UUID],
+    kind: str,
+    offset: timedelta,
+) -> None:
+    before = movement_count(db_session, cat)
+
+    with pytest.raises(DomainError, match="was counted at 2026-11-10T20:00:00Z"):
+        write(db_session, cat, kind, COUNT_AT + offset, counted[0])
+
+    assert movement_count(db_session, cat) == before
+
+
+@pytest.mark.parametrize("kind", ["receipt", "usage", "waste"])
+def test_a_write_one_second_after_a_count_is_accepted(
+    db_session: Session, cat: Catalogue, counted: tuple[UUID, UUID], kind: str
+) -> None:
+    write(db_session, cat, kind, COUNT_AT + ONE_SECOND, counted[0])
+
+    assert_reconciled(db_session, cat)
+
+
+def test_a_reversal_dated_at_the_count_is_refused(
+    db_session: Session, cat: Catalogue, counted: tuple[UUID, UUID]
+) -> None:
+    # The usage at exactly COUNT_AT came before the count; its reversal would
+    # be dated COUNT_AT too.
+    with pytest.raises(DomainError, match="was counted at"):
+        do_reverse(db_session, cat, counted[1])
+
+
+def test_a_reversal_of_a_request_from_before_the_count_is_refused(
+    db_session: Session, cat: Catalogue
+) -> None:
+    do_receive(db_session, cat, milk(cat, "2"))
+    usage = do_use(db_session, cat, cat.item, "100")  # 10 Nov at noon
+    do_count(db_session, cat, tracked(cat.item))
+
+    with pytest.raises(DomainError, match="was counted at"):
+        do_reverse(db_session, cat, usage.movements[0].client_id)
+
+
+def test_a_reversal_one_second_after_the_count_is_accepted(
+    db_session: Session, cat: Catalogue, counted: tuple[UUID, UUID]
+) -> None:
+    usage = do_use(db_session, cat, cat.item, "100", occurred_at=COUNT_AT + ONE_SECOND)
+
+    result = do_reverse(db_session, cat, usage.movements[0].client_id)
+
+    assert [m.occurred_at for m in result.movements] == [COUNT_AT + ONE_SECOND]
+    assert_reconciled(db_session, cat)
+
+
+def test_a_retried_request_from_before_a_count_still_replays(
+    db_session: Session, cat: Catalogue
+) -> None:
+    do_receive(db_session, cat, milk(cat, "2"))
+    client_id = uuid.uuid4()
+    first = do_use(db_session, cat, cat.item, "100", client_id=client_id)
+    do_count(db_session, cat, tracked(cat.item))
+
+    again = do_use(db_session, cat, cat.item, "100", client_id=client_id)
+
+    assert again.replayed
+    assert [m.id for m in again.movements] == [m.id for m in first.movements]
+
+
+def test_a_receipt_with_a_counted_item_is_refused_whole(
+    db_session: Session,
+    cat: Catalogue,
+    counted: tuple[UUID, UUID],
+    flour: tuple[Item, ItemUnit],
+) -> None:
+    item, sack = flour
+
+    with pytest.raises(DomainError, match=f"item {cat.item.sku} was counted"):
+        do_receive(
+            db_session, cat, line(item, sack, "1", "12.500"), milk(cat, "1"), received_at=COUNT_AT
+        )
+
+
+def test_other_items_and_locations_are_not_blocked(
+    db_session: Session,
+    cat: Catalogue,
+    counted: tuple[UUID, UUID],
+    flour: tuple[Item, ItemUnit],
+) -> None:
+    item, sack = flour
+    an_hour_before = COUNT_AT - timedelta(hours=1)
+    store = add(db_session, new_location(cat.business.id, name="Storeroom", kind="storeroom"))
+
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=an_hour_before)
+    do_use(db_session, cat, item, "100", occurred_at=an_hour_before)
+    receive(
+        db_session,
+        cat.business.id,
+        location_id=store.id,
+        supplier_id=cat.supplier.id,
+        received_at=an_hour_before,
+        invoice_ref=None,
+        lines=[milk(cat, "1")],
+        client_id=uuid.uuid4(),
+        source="manual",
+    )
+    do_count(db_session, cat, tracked(cat.item), location_id=store.id, counted_at=an_hour_before)
+
+    assert_reconciled(db_session, cat)

@@ -19,7 +19,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.domain.checks import ZERO, check_counted_quantity
@@ -30,6 +30,7 @@ from app.domain.stock import (
     _check_timestamp,
     _check_user,
     _get,
+    _latest_counts,
     _Ledger,
     _lock_batches,
     _lock_defaults,
@@ -108,6 +109,10 @@ def count_stock(
     item gets a line for its default batch, so counting an item always leaves
     a line. Inactive items can be counted, so a retired item's leftover stock
     can be zeroed.
+
+    A count is a barrier per item and location (D51): it must be dated at or
+    after every movement of the item there and after its latest count, and
+    stock.py then refuses any write for the item there dated at or before it.
     """
     _check_timestamp(counted_at, "counted_at")
     _check_source(source)
@@ -138,6 +143,7 @@ def count_stock(
             ~Batch.is_default,
             (StockBalance.qty_on_hand != 0) | Batch.id.in_(list(named)),
         )
+    _check_barrier(session, business_id, location_id, counted_at, catalogue)
 
     # What each covered batch was counted at.
     counted: dict[UUID, tuple[_BatchState, Decimal]] = {}
@@ -307,6 +313,51 @@ def _load_named_batches(
                 f" after counted_at {iso_utc(counted_at)}"
             )
     return {b.batch_id: b.counted_qty for i in items for b in i.batches or ()}
+
+
+def _check_barrier(
+    session: Session,
+    business_id: UUID,
+    location_id: UUID,
+    counted_at: datetime,
+    catalogue: dict[UUID, Item],
+) -> None:
+    """The count barrier (D51): a count is dated after the item's latest count
+    at the location, and at or after its latest movement there.
+
+    Run after the locks, in statements of its own, so a write or count that
+    held the item's lock is seen once it commits. The latest movement is the
+    latest last_movement_at of all the item's batches there, empty ones
+    included: a usage that empties a batch can be the item's latest movement
+    while the batches with stock last moved earlier. With the barrier, each
+    batch's balance now is its balance at counted_at.
+    """
+    pairs = [(location_id, item_id) for item_id in catalogue]
+    latest = _latest_counts(session, business_id, pairs)
+    last_moved = dict(
+        session.execute(
+            select(StockBalance.item_id, func.max(StockBalance.last_movement_at))
+            .where(
+                StockBalance.business_id == business_id,
+                StockBalance.location_id == location_id,
+                StockBalance.item_id.in_(list(catalogue)),
+            )
+            .group_by(StockBalance.item_id)
+        ).all()
+    )
+    for item_id, item in sorted(catalogue.items(), key=lambda pair: pair[1].sku):
+        last_count = latest.get((location_id, item_id))
+        if last_count is not None and counted_at <= last_count:
+            raise DomainError(
+                f"item {item.sku} was last counted at {iso_utc(last_count)} at this location,"
+                f" so a new count must be dated after it (got {iso_utc(counted_at)})"
+            )
+        last_movement = last_moved.get(item_id)
+        if last_movement is not None and counted_at < last_movement:
+            raise DomainError(
+                f"item {item.sku} has a movement at {iso_utc(last_movement)} at this location,"
+                f" so a count must be dated at or after it (got {iso_utc(counted_at)})"
+            )
 
 
 def _load_lines(session: Session, business_id: UUID, count_id: UUID) -> tuple[StockCountLine, ...]:

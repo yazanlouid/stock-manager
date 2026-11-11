@@ -33,6 +33,7 @@ from app.models import (
     ReceiptLine,
     StockBalance,
     StockCount,
+    StockCountLine,
     StockMovement,
     Supplier,
     User,
@@ -208,6 +209,60 @@ def _lock_defaults(
         tuple_(Batch.location_id, Batch.item_id).in_(pairs),
     )
     return {(b.location_id, b.item_id): b for b in batches}
+
+
+# The count barrier (D51). A count is a barrier per item and location: once an
+# item is counted at a location, no write for it there may be dated at or
+# before the count, so the count's lines stay true as of counted_at. Each
+# function checks right after _lock_defaults: a concurrent count locks the same
+# default batches, so once its locks are released this later statement sees it
+# (the same reasoning as Locking above). Each replay check still comes first,
+# so a retried request replays.
+
+
+def _latest_counts(
+    session: Session, business_id: UUID, pairs: Iterable[tuple[UUID, UUID]]
+) -> dict[tuple[UUID, UUID], datetime]:
+    """The latest counted_at of each (location_id, item_id) counted there.
+
+    Every count leaves a line for each counted item's default batch, so an
+    item's lines find every count of it.
+    """
+    rows = session.execute(
+        select(StockCountLine.location_id, StockCountLine.item_id, func.max(StockCount.counted_at))
+        .join(
+            StockCount,
+            (StockCount.business_id == StockCountLine.business_id)
+            & (StockCount.id == StockCountLine.count_id),
+        )
+        .where(
+            StockCountLine.business_id == business_id,
+            tuple_(StockCountLine.location_id, StockCountLine.item_id).in_(sorted(set(pairs))),
+        )
+        .group_by(StockCountLine.location_id, StockCountLine.item_id)
+    )
+    return {(location_id, item_id): counted_at for location_id, item_id, counted_at in rows}
+
+
+def _check_count_barrier(
+    session: Session, business_id: UUID, writes: dict[tuple[UUID, UUID], datetime]
+) -> None:
+    """Refuse a write dated at or before its item's latest count at the location.
+
+    writes maps each (location_id, item_id) the request writes to the earliest
+    time it writes there.
+    """
+    latest = _latest_counts(session, business_id, writes)
+    for (location_id, item_id), at in sorted(writes.items()):
+        counted_at = latest.get((location_id, item_id))
+        if counted_at is not None and at <= counted_at:
+            sku = session.scalar(
+                select(Item.sku).where(Item.business_id == business_id, Item.id == item_id)
+            )
+            raise DomainError(
+                f"item {sku} was counted at {iso_utc(counted_at)} at this location, so nothing"
+                f" for it there can be dated at or before then (got {iso_utc(at)})"
+            )
 
 
 class _Ledger:
@@ -533,6 +588,7 @@ def receive(
     # Every item on the receipt gets its default batch, even batch-tracked ones:
     # it is the item's lock (see Locking above), and settling needs its balance.
     defaults = _lock_defaults(session, business_id, ((location_id, p.item.id) for p in plans))
+    _check_count_barrier(session, business_id, dict.fromkeys(defaults, received_at))
 
     receipt = Receipt(
         business_id=business_id,
@@ -641,6 +697,7 @@ def use(
     _check_user(session, business_id, user_id)
 
     default = _lock_defaults(session, business_id, [(location_id, item_id)])[(location_id, item_id)]
+    _check_count_barrier(session, business_id, {(location_id, item_id): occurred_at})
     # Batches with nothing on hand can't be drawn, so they needn't be locked.
     # Non-default batches never go negative, so on_hand > 0 skips only empty ones.
     batches = [
@@ -707,6 +764,7 @@ def waste(
     _check_user(session, business_id, user_id)
 
     default = _lock_defaults(session, business_id, [(location_id, item_id)])[(location_id, item_id)]
+    _check_count_barrier(session, business_id, {(location_id, item_id): occurred_at})
     if batch_id is None or batch_id == default.id:
         if batch_id is None and item.tracks_batches:
             raise DomainError(f"item {item.sku} tracks batches, so name the batch to waste")
@@ -805,6 +863,15 @@ def reverse(
     )
     if already is not None:
         raise DomainError(f"request {original_client_id} was already reversed")
+
+    # A reversal is dated at its original's occurred_at, so it can't reach back
+    # past a count of the item either. Checked after "already reversed", which
+    # is the more useful answer when both apply.
+    earliest: dict[tuple[UUID, UUID], datetime] = {}
+    for m in originals:
+        key = (m.location_id, m.item_id)
+        earliest[key] = min(earliest.get(key, m.occurred_at), m.occurred_at)
+    _check_count_barrier(session, business_id, earliest)
 
     ledger = _Ledger(session, business_id, client_id, source, user_id)
     for original in originals:

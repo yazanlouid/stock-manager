@@ -1,13 +1,15 @@
-"""Domain rules 1 to 7 over random sequences of stock requests (Hypothesis).
+"""Domain rules 1 to 7 and 9 over random sequences of stock requests (Hypothesis).
 
-A RuleBasedStateMachine posts random receives, usages, wastes, reversals and
-retries for three items: milk (batches and expiry), eggs (batches, no expiry)
-and flour (no batch tracking), with expiry dates a few days either side of the
-usage dates and times near midnight in Amman.
+A RuleBasedStateMachine posts random receives, usages, wastes, reversals,
+counts and retries for three items: milk (batches and expiry), eggs (batches,
+no expiry) and flour (no batch tracking), with expiry dates a few days either
+side of the usage dates and times near midnight in Amman.
 
-Rules 2, 3 and 7 are about the moment of a write, so the rules check them
+Rules 2, 3, 7 and 9 are about the moment of a write, so the rules check them
 against a snapshot taken just before it. Rules 1, 4, 5 and 6 are about the
-state, so the invariants check them after every step.
+state, so the invariants check them after every step. Every rule expects the
+DomainError when its time breaks the count barrier (D51), and usage and waste
+respect the received_at rule (D50).
 
 Each example opens its own connection and transaction and rolls it back in
 teardown, because function-scoped fixtures don't reset between examples
@@ -36,10 +38,11 @@ from hypothesis.stateful import (
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
+from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
-from app.models import Batch, ReceiptLine, StockBalance, StockMovement
+from app.models import Batch, ReceiptLine, StockBalance, StockCount, StockMovement
 from tests.builders import add, build_catalogue, new_item, new_unit
 
 # Asia/Amman (the test business's timezone) has been UTC+3 all year since
@@ -102,6 +105,8 @@ class StockLedgerMachine(RuleBasedStateMachine):
         self.day = FIRST_DAY
         self.requests: list[Request] = []
         self.reversed: set[UUID] = set()
+        # Each counted item's latest counted_at (one location).
+        self.last_count: dict[UUID, datetime] = {}
 
     def teardown(self) -> None:
         self.db.close()
@@ -147,8 +152,27 @@ class StockLedgerMachine(RuleBasedStateMachine):
             .where(StockMovement.business_id == self.business_id)
         )
 
+    def count_rows(self) -> int:
+        return self.db.scalar(
+            select(func.count())
+            .select_from(StockCount)
+            .where(StockCount.business_id == self.business_id)
+        )
+
     def remember(self, kind: str, client_id: UUID, call: Callable, movements) -> None:
         self.requests.append(Request(kind, client_id, call, tuple(movements)))
+
+    def barred(self, item_id: UUID, at: datetime) -> bool:
+        """D51: a write for the item dated at or before its latest count is refused."""
+        counted_at = self.last_count.get(item_id)
+        return counted_at is not None and at <= counted_at
+
+    def expect_refused(self, call: Callable, match: str | None = None) -> None:
+        """The call raises DomainError and writes nothing."""
+        before = self.movement_count(), self.count_rows()
+        with pytest.raises(DomainError, match=match):
+            call()
+        assert (self.movement_count(), self.count_rows()) == before
 
     # --- Rules ------------------------------------------------------------------
 
@@ -192,6 +216,9 @@ class StockLedgerMachine(RuleBasedStateMachine):
             client_id=client_id,
             source="simulator",
         )
+        if any(self.barred(item_id, self.at(hour)) for item_id in received_qty):
+            self.expect_refused(call, "was counted at")
+            return
         result = call()
         self.remember("receive", client_id, call, result.movements)
 
@@ -246,6 +273,9 @@ class StockLedgerMachine(RuleBasedStateMachine):
             client_id=client_id,
             source="simulator",
         )
+        if self.barred(item.id, occurred_at):
+            self.expect_refused(call, "was counted at")
+            return
         result = call()
         self.remember("use", client_id, call, result.movements)
 
@@ -289,19 +319,16 @@ class StockLedgerMachine(RuleBasedStateMachine):
             client_id=client_id,
             source="simulator",
         )
+        if self.barred(item.id, occurred_at):
+            self.expect_refused(call, "was counted at")
+            return
         # D50: waste can't name a batch received after it. A default batch's
         # received_at is when it was created, so the rule never applies to it.
         if not target.batch.is_default and target.batch.received_at > occurred_at:
-            count = self.movement_count()
-            with pytest.raises(DomainError, match="received at"):
-                call()
-            assert self.movement_count() == count
+            self.expect_refused(call, "received at")
             return
         if quantity > target.batch.on_hand:
-            count = self.movement_count()
-            with pytest.raises(DomainError, match="on hand"):
-                call()
-            assert self.movement_count() == count
+            self.expect_refused(call, "on hand")
             return
 
         result = call()
@@ -328,8 +355,11 @@ class StockLedgerMachine(RuleBasedStateMachine):
         )
         if original.client_id in self.reversed:
             # Rule 6: each movement can be reversed once.
-            with pytest.raises(DomainError, match="already reversed"):
-                call()
+            self.expect_refused(call, "already reversed")
+            return
+        # D51: a reversal is dated at its original's occurred_at.
+        if any(self.barred(m.item_id, m.occurred_at) for m in original.movements):
+            self.expect_refused(call, "was counted at")
             return
 
         result = call()
@@ -343,12 +373,18 @@ class StockLedgerMachine(RuleBasedStateMachine):
             (m.id, m.batch_id, -m.qty_delta, m.unit_cost, m.occurred_at) for m in original.movements
         ]
 
-    @precondition(lambda self: any(r.kind in ("receive", "reverse") for r in self.requests))
+    def irreversible(self) -> list[Request]:
+        """Receipts, reversals and counts that posted adjustments."""
+        return [
+            r
+            for r in self.requests
+            if r.kind in ("receive", "reverse") or (r.kind == "count" and r.movements)
+        ]
+
+    @precondition(lambda self: self.irreversible())
     @rule(data=st.data())
     def reverse_what_cant_be_reversed(self, data: st.DataObject) -> None:
-        original = data.draw(
-            st.sampled_from([r for r in self.requests if r.kind in ("receive", "reverse")])
-        )
+        original = data.draw(st.sampled_from(self.irreversible()))
         with pytest.raises(DomainError, match="only usage and waste can be reversed"):
             reverse(
                 self.db,
@@ -357,6 +393,94 @@ class StockLedgerMachine(RuleBasedStateMachine):
                 client_id=uuid.uuid4(),
                 source="manual",
             )
+
+    @rule(index=ITEMS, hour=HOURS, minute=MINUTES, data=st.data())
+    def count_items(self, index: int, hour: int, minute: int, data: st.DataObject) -> None:
+        item, _ = self.items[index]
+        counted_at = self.at(hour, minute)
+        before = self.snapshots(item.id)
+        if item.tracks_batches:
+            others = sorted(
+                (s for s in before.values() if not s.batch.is_default), key=lambda s: s.batch.id
+            )
+            named = data.draw(
+                st.lists(st.sampled_from(others), unique_by=lambda s: s.batch.id)
+                if others
+                else st.just([])
+            )
+            counts = {s.batch.id: data.draw(thousandths(0, 3_000_000)) for s in named}
+            counted_item = CountItemInput(
+                item.id, batches=[BatchCountInput(b, qty) for b, qty in counts.items()]
+            )
+        else:
+            named, counts = [], {}
+            counted_qty = data.draw(thousandths(0, 3_000_000))
+            counted_item = CountItemInput(item.id, counted_qty=counted_qty)
+
+        client_id = uuid.uuid4()
+        call = partial(
+            count_stock,
+            self.db,
+            self.business_id,
+            location_id=self.cat.location.id,
+            counted_at=counted_at,
+            items=[counted_item],
+            client_id=client_id,
+            source="simulator",
+        )
+        last_movement_at = self.db.scalar(
+            select(func.max(StockBalance.last_movement_at)).where(
+                StockBalance.business_id == self.business_id,
+                StockBalance.location_id == self.cat.location.id,
+                StockBalance.item_id == item.id,
+            )
+        )
+        # A named batch received later, a count not after the last one, or one
+        # before the item's latest movement on any batch (D51).
+        if (
+            any(s.batch.received_at > counted_at for s in named)
+            or self.barred(item.id, counted_at)
+            or (last_movement_at is not None and counted_at < last_movement_at)
+        ):
+            self.expect_refused(call)
+            return
+
+        result = call()
+        self.last_count[item.id] = counted_at
+        self.remember("count", client_id, call, result.movements)
+
+        # Rule 9: what each batch the count covers was expected and counted at.
+        # An untracked item's default batch takes counted_qty; a tracked item's
+        # named batches take theirs and every other batch goes to zero.
+        after = self.snapshots(item.id)
+        default_id = self.default_of(after).batch.id
+        expected = {s.batch.id: s.batch.on_hand for s in before.values()}
+        covered = {default_id} | counts.keys()
+        covered |= {b for b, s in before.items() if not s.batch.is_default and s.batch.on_hand}
+        target = {b: counts.get(b, Decimal(0)) for b in covered}
+        if not item.tracks_batches:
+            target[default_id] = counted_qty
+        assert {(x.batch_id, x.expected_qty, x.counted_qty) for x in result.lines} == {
+            (b, expected.get(b, Decimal(0)), qty) for b, qty in target.items()
+        }
+        assert {b: s.batch.on_hand for b, s in after.items() if b in covered} == target
+        assert all(s.batch.on_hand == 0 for b, s in after.items() if b not in covered)
+
+        # Each difference posts one count_adjust at the batch's cost, at
+        # counted_at, for its line; and no batch's cost changes (rule 7).
+        line_of = {x.id: x for x in result.lines}
+        assert len(result.movements) == sum(x.counted_qty != x.expected_qty for x in result.lines)
+        for m in result.movements:
+            line = line_of[m.stock_count_line_id]
+            cost = before[m.batch_id].unit_cost if m.batch_id in before else None
+            assert (m.type, m.batch_id, m.occurred_at, m.unit_cost) == (
+                "count_adjust",
+                line.batch_id,
+                counted_at,
+                cost,
+            )
+            assert m.qty_delta == line.counted_qty - line.expected_qty
+        assert all(after[b].unit_cost == s.unit_cost for b, s in before.items())
 
     @precondition(lambda self: self.requests)
     @rule(data=st.data())
