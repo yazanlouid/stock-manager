@@ -40,7 +40,9 @@ From `api/`:
 - Tests: `uv run pytest`
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format .` (CI runs `uv run ruff format --check .`)
-- Simulator: add the exact command here once it exists (week 1)
+- Fresh demo data (asks for confirmation, recreates the schema, then seeds and simulates 30 days): `uv run python -m app.cli reset`
+- Seed and simulate into an empty, migrated database: `uv run python -m app.cli simulate`
+- Check every business's ledger: `uv run python -m app.cli reconcile`
 
 If a command stops matching the code, fix the code or update this section in the same change.
 
