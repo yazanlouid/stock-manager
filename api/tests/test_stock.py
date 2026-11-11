@@ -28,7 +28,7 @@ from app.domain.stock import (
     waste,
 )
 from app.models import Batch, Item, ItemUnit, ReceiptLine, StockBalance, StockMovement
-from tests.builders import RECEIVED_AT, Catalogue, add, new_item, new_unit
+from tests.builders import RECEIVED_AT, Catalogue, add, new_unit
 
 
 def d(value: str) -> Decimal:
@@ -44,22 +44,6 @@ NOV_10_NOON = nov(10)
 
 
 # --- Fixtures and helpers -------------------------------------------------------
-
-
-@pytest.fixture
-def flour(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
-    """An item without batch tracking, bought by the 25 kg sack."""
-    item = add(db_session, new_item(cat.business.id, name="Flour", base_unit="g"))
-    return item, add(db_session, new_unit(item, name="sack", factor_to_base=d("25000")))
-
-
-@pytest.fixture
-def eggs(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
-    """An item that tracks batches but not expiry, bought by the tray of 30."""
-    item = add(
-        db_session, new_item(cat.business.id, name="Eggs", base_unit="piece", tracks_batches=True)
-    )
-    return item, add(db_session, new_unit(item, name="tray", factor_to_base=d("30")))
 
 
 def line(

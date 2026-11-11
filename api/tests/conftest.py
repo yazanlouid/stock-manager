@@ -8,6 +8,7 @@ nothing a test writes is kept and ledger rows are never deleted.
 
 from collections.abc import Callable, Iterator
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,16 @@ from app.api.deps import now
 from app.config import get_settings
 from app.db import commit_or_rollback, get_db
 from app.main import app
-from tests.builders import Catalogue, Stock, build_catalogue, build_stock
+from app.models import Item, ItemUnit
+from tests.builders import (
+    Catalogue,
+    Stock,
+    add,
+    build_catalogue,
+    build_stock,
+    new_item,
+    new_unit,
+)
 
 API_DIR = Path(__file__).resolve().parents[1]
 TEST_DB_NAME = "stock_test"
@@ -164,3 +174,19 @@ def stock(db_session: Session, cat: Catalogue) -> Stock:
 def other_stock(db_session: Session, other: Catalogue) -> Stock:
     """The same stock rows in the second business."""
     return build_stock(db_session, other)
+
+
+@pytest.fixture
+def flour(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
+    """An item without batch tracking in cat's business, bought by the 25 kg sack."""
+    item = add(db_session, new_item(cat.business.id, name="Flour", base_unit="g"))
+    return item, add(db_session, new_unit(item, name="sack", factor_to_base=Decimal("25000")))
+
+
+@pytest.fixture
+def eggs(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
+    """An item that tracks batches but not expiry, bought by the tray of 30."""
+    item = add(
+        db_session, new_item(cat.business.id, name="Eggs", base_unit="piece", tracks_batches=True)
+    )
+    return item, add(db_session, new_unit(item, name="tray", factor_to_base=Decimal("30")))

@@ -1,6 +1,7 @@
-"""Stock domain functions: the only code that writes the ledger.
+"""Stock domain functions: with counts.py, the only code that writes the ledger.
 
-Each function works on the caller's Session and never commits (hard rule 3):
+counts.py posts count adjustments with the locking, ledger and lookup helpers
+defined here. Each function works on the caller's Session and never commits (hard rule 3):
 the API request, the simulator or the test owns the transaction. Each one
 - scopes every lookup by business_id, so another business's rows are "not found";
 - raises DomainError, with a message a user can act on, for a request it refuses;
@@ -31,6 +32,7 @@ from app.models import (
     Receipt,
     ReceiptLine,
     StockBalance,
+    StockCount,
     StockMovement,
     Supplier,
     User,
@@ -236,6 +238,7 @@ class _Ledger:
         *,
         reason: str | None = None,
         receipt_line_id: UUID | None = None,
+        stock_count_line_id: UUID | None = None,
         reverses_id: UUID | None = None,
     ) -> StockMovement:
         movement = StockMovement(
@@ -249,6 +252,7 @@ class _Ledger:
             reason=reason,
             unit_cost=unit_cost,
             receipt_line_id=receipt_line_id,
+            stock_count_line_id=stock_count_line_id,
             reverses_id=reverses_id,
             occurred_at=occurred_at,
             user_id=self.user_id,
@@ -323,6 +327,8 @@ def _replay(
 
     The unique key on (business_id, client_id, client_seq) is the backstop for
     two retries racing each other; this check makes the common retry a no-op.
+    A client_id a count used is refused even when the count wrote no
+    movements, so it is looked up in stock_counts too.
     """
     movements = tuple(
         session.scalars(
@@ -332,6 +338,13 @@ def _replay(
         )
     )
     if not movements:
+        counted = session.scalar(
+            select(StockCount.id).where(
+                StockCount.business_id == business_id, StockCount.client_id == client_id
+            )
+        )
+        if counted is not None:
+            raise DomainError(f"client_id {client_id} was already used for a different request")
         return None
     if not {m.type for m in movements} <= types:
         raise DomainError(f"client_id {client_id} was already used for a different request")
