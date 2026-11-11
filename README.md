@@ -6,7 +6,13 @@ The scope, data model and decisions live in [docs/](docs/): [spec.md](docs/spec.
 
 ## Status
 
-Scaffold only: a FastAPI app with a `/health` endpoint, PostgreSQL in Docker, Alembic, tests and CI. The ledger core lands in week 1.
+Week 1 of four, the ledger core, is done, and its gate passes in CI: 30 simulated café days reconcile exactly with the ledger.
+
+- **Ledger:** append-only stock movements with batches, expiry dates and an on-hand projection that rebuilds from the ledger. Receive, use (earliest-expiring stock first, skipping expired batches), waste and reverse run as domain functions on Postgres, with property-based tests for the ledger rules.
+- **Demo data:** one made-up café with 40 items and 6 suppliers, a 30-day simulator that writes only through the domain functions, and a reconcile check.
+- **API:** receive, use, waste and reverse, plus read-only stock and catalogue endpoints.
+
+Week 2 adds stock counts, par levels, alerts, draft orders and a 90-day simulator for a café, a sweets shop and a cloud kitchen. The dashboard follows in week 3 and the capture app in week 4.
 
 ## Prerequisites
 
