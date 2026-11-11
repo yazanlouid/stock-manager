@@ -161,3 +161,65 @@ class StockEntryOut(BaseModel):
     expired: Decimal
     # Batches with non-zero on-hand, in FEFO order with the default batch last.
     batches: list[StockBatchOut]
+
+
+# --- GET /catalogue ------------------------------------------------------------
+
+
+class BusinessOut(ResponseModel):
+    id: UUID
+    name: str
+    # ISO 4217 code, for example JOD.
+    currency: str
+    # IANA name, for example Asia/Amman.
+    timezone: str
+
+
+class LocationOut(ResponseModel):
+    id: UUID
+    name: str
+    kind: str
+
+
+class SupplierOut(ResponseModel):
+    id: UUID
+    name: str
+    phone: str | None
+    lead_time_days: int
+
+
+class ItemUnitOut(ResponseModel):
+    id: UUID
+    name: str
+    # Base units in one of this unit.
+    factor_to_base: Decimal
+
+
+class SupplierPriceOut(ResponseModel):
+    supplier_id: UUID
+    item_unit_id: UUID
+    # Price of one pack of item_unit_id.
+    pack_price: Decimal
+    is_preferred: bool
+
+
+class CatalogueItemOut(ResponseModel):
+    id: UUID
+    sku: str
+    name: str
+    category: str | None
+    base_unit: str
+    # Whether a receipt line creates a batch, and whether waste names one.
+    tracks_batches: bool
+    # Whether a receipt line needs expires_on.
+    tracks_expiry: bool
+    shelf_life_days: int | None
+    units: list[ItemUnitOut]
+    supplier_prices: list[SupplierPriceOut]
+
+
+class CatalogueOut(BaseModel):
+    business: BusinessOut
+    locations: list[LocationOut]
+    suppliers: list[SupplierOut]
+    items: list[CatalogueItemOut]

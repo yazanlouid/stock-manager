@@ -4,12 +4,13 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.api import stock
+from app.api import catalogue, stock
 from app.api.deps import DbSession
 from app.domain.errors import DomainError
 
 app = FastAPI(title="Perishable Stock Manager API")
 app.include_router(stock.router)
+app.include_router(catalogue.router)
 
 
 @app.exception_handler(DomainError)
