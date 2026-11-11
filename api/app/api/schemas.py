@@ -5,13 +5,32 @@ gets a 422 rather than having it ignored. They don't repeat the domain's
 checks: quantities and prices are plain Decimals, and check_quantity or
 check_money gives the 400. Every endpoint returns one of these models, never
 a dict, so Decimals are written as strings ("0.000850"), not floats.
+
+Response Decimals are written at their column's scale: quantities and money
+with three decimals ("-300.000"), unit costs with six. A response built from
+rows the request just wrote holds the Decimals Python computed ("-300"),
+while a replay reads them back from Postgres ("-300.000"); fixing the scale
+makes both the same. Every value already fits its column, so nothing rounds.
 """
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, PlainSerializer
+
+
+def _at_scale(places: int) -> PlainSerializer:
+    step = Decimal(1).scaleb(-places)
+    return PlainSerializer(lambda value: str(value.quantize(step)), return_type=str)
+
+
+# numeric(14,3): quantities in base units, pack prices and factor_to_base.
+Quantity = Annotated[Decimal, _at_scale(3)]
+Money = Annotated[Decimal, _at_scale(3)]
+# numeric(18,6): cost per base unit.
+UnitCost = Annotated[Decimal, _at_scale(6)]
 
 
 class RequestModel(BaseModel):
@@ -84,11 +103,11 @@ class MovementOut(ResponseModel):
     location_id: UUID
     item_id: UUID
     batch_id: UUID
-    qty_delta: Decimal
+    qty_delta: Quantity
     type: str
     source: str
     reason: str | None
-    unit_cost: Decimal | None
+    unit_cost: UnitCost | None
     receipt_line_id: UUID | None
     reverses_id: UUID | None
     occurred_at: datetime
@@ -123,7 +142,7 @@ class ReceiptResponse(MovementsResponse):
 
 class UsageResponse(MovementsResponse):
     # How far the default batch went negative; null for a replay.
-    shortfall: Decimal | None
+    shortfall: Quantity | None
 
 
 # --- GET /stock ----------------------------------------------------------------
@@ -138,9 +157,9 @@ class StockBatchOut(BaseModel):
     lot_code: str | None
     received_at: datetime
     # Negative only for a default batch with an unsettled shortfall.
-    on_hand: Decimal
+    on_hand: Quantity
     # Per base unit; null for a default batch that has never received anything.
-    unit_cost: Decimal | None
+    unit_cost: UnitCost | None
     # Past its expiry date in the business's timezone; usable on the date itself.
     expired: bool
 
@@ -156,9 +175,9 @@ class StockEntryOut(BaseModel):
     location_id: UUID
     location_name: str
     # Sum of every batch, default included, so negative while a shortfall is unsettled.
-    on_hand: Decimal
+    on_hand: Quantity
     # On-hand in batches past their expiry date.
-    expired: Decimal
+    expired: Quantity
     # Batches with non-zero on-hand, in FEFO order with the default batch last.
     batches: list[StockBatchOut]
 
@@ -192,14 +211,14 @@ class ItemUnitOut(ResponseModel):
     id: UUID
     name: str
     # Base units in one of this unit.
-    factor_to_base: Decimal
+    factor_to_base: Quantity
 
 
 class SupplierPriceOut(ResponseModel):
     supplier_id: UUID
     item_unit_id: UUID
     # Price of one pack of item_unit_id.
-    pack_price: Decimal
+    pack_price: Money
     is_preferred: bool
 
 
