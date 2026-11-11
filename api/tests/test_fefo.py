@@ -18,6 +18,9 @@ from app.domain.fefo import Allocation, BatchSnapshot, FefoResult, allocate_usag
 
 AS_OF = date(2026, 11, 10)
 MONDAY_8AM = datetime(2026, 11, 2, 8, tzinfo=UTC)
+# The usage's occurred_at, after every received_at below unless a test says
+# otherwise, so only the tests about D50 depend on it.
+USED_AT = datetime(2026, 11, 10, 12, tzinfo=UTC)
 
 DEFAULT_ID = UUID(int=0)
 A = UUID(int=1)
@@ -57,7 +60,7 @@ def allocations(*pairs: tuple[UUID, str]) -> tuple[Allocation, ...]:
 def test_earliest_expiry_is_drawn_first() -> None:
     batches = [batch(A, "10", days(5)), batch(B, "10", days(2)), default_batch()]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result == FefoResult(allocations((B, "4")), shortfall=d("0"))
 
@@ -65,7 +68,7 @@ def test_earliest_expiry_is_drawn_first() -> None:
 def test_a_batch_with_no_expiry_comes_after_dated_batches() -> None:
     batches = [batch(A, "10", None), batch(B, "10", days(30)), default_batch()]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((B, "4"))
 
@@ -77,7 +80,7 @@ def test_same_expiry_is_broken_by_received_at() -> None:
         default_batch(),
     ]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((B, "4"))
 
@@ -85,7 +88,7 @@ def test_same_expiry_is_broken_by_received_at() -> None:
 def test_same_expiry_and_received_at_is_broken_by_id() -> None:
     batches = [batch(B, "10", days(3)), batch(A, "10", days(3)), default_batch()]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((A, "4"))
 
@@ -97,7 +100,7 @@ def test_expired_batch_is_skipped_but_one_expiring_today_is_used() -> None:
         default_batch(),
     ]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((B, "4"))
 
@@ -106,7 +109,7 @@ def test_empty_and_negative_batches_are_skipped() -> None:
     batches = [batch(A, "0", days(1)), batch(B, "-2", days(2)), batch(C, "10", days(3))]
     batches.append(default_batch())
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((C, "4"))
 
@@ -114,7 +117,7 @@ def test_empty_and_negative_batches_are_skipped() -> None:
 def test_usage_splits_across_two_batches_in_fefo_order() -> None:
     batches = [batch(A, "3.250", days(1)), batch(B, "10", days(2)), default_batch()]
 
-    result = allocate_usage(batches, d("5"), AS_OF)
+    result = allocate_usage(batches, d("5"), AS_OF, USED_AT)
 
     assert result == FefoResult(allocations((A, "3.250"), (B, "1.750")), shortfall=d("0"))
 
@@ -123,7 +126,7 @@ def test_shortfall_goes_to_default_batch_that_starts_positive() -> None:
     """The default batch holds 1 of the 3 missing, so 2 is a shortfall."""
     batches = [batch(A, "2", days(1)), default_batch("1")]
 
-    result = allocate_usage(batches, d("5"), AS_OF)
+    result = allocate_usage(batches, d("5"), AS_OF, USED_AT)
 
     assert result == FefoResult(allocations((A, "2"), (DEFAULT_ID, "3")), shortfall=d("2"))
 
@@ -132,7 +135,7 @@ def test_shortfall_goes_to_default_batch_that_is_already_negative() -> None:
     """A default batch at -4 holds nothing, so all 3 missing are a shortfall."""
     batches = [batch(A, "2", days(1)), default_batch("-4")]
 
-    result = allocate_usage(batches, d("5"), AS_OF)
+    result = allocate_usage(batches, d("5"), AS_OF, USED_AT)
 
     assert result == FefoResult(allocations((A, "2"), (DEFAULT_ID, "3")), shortfall=d("3"))
 
@@ -143,15 +146,43 @@ def test_default_batch_comes_last_even_if_received_first() -> None:
         default_batch("10", received_at=MONDAY_8AM),
     ]
 
-    result = allocate_usage(batches, d("4"), AS_OF)
+    result = allocate_usage(batches, d("4"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((A, "4"))
 
 
 def test_item_without_batch_tracking_uses_only_its_default_batch() -> None:
-    result = allocate_usage([default_batch("500")], d("30"), AS_OF)
+    result = allocate_usage([default_batch("500")], d("30"), AS_OF, USED_AT)
 
     assert result == FefoResult(allocations((DEFAULT_ID, "30")), shortfall=d("0"))
+
+
+def test_a_batch_received_after_the_usage_is_skipped() -> None:
+    # A usage logged for 07:59 can't draw from a delivery received at 08:00,
+    # so it falls to the default batch as a shortfall although A holds stock.
+    batches = [batch(A, "10", days(2), received_at=MONDAY_8AM), default_batch("0")]
+
+    result = allocate_usage(batches, d("4"), AS_OF, MONDAY_8AM - timedelta(minutes=1))
+
+    assert result == FefoResult(allocations((DEFAULT_ID, "4")), shortfall=d("4"))
+
+
+def test_a_batch_received_at_the_usage_time_is_drawn() -> None:
+    batches = [batch(A, "10", days(2), received_at=MONDAY_8AM), default_batch("0")]
+
+    result = allocate_usage(batches, d("4"), AS_OF, MONDAY_8AM)
+
+    assert result == FefoResult(allocations((A, "4")), shortfall=d("0"))
+
+
+def test_the_default_batch_is_drawn_even_if_created_after_the_usage() -> None:
+    # A default batch's received_at is when it was created (the real clock),
+    # so it is always available.
+    batches = [default_batch("5", received_at=MONDAY_8AM + timedelta(days=30))]
+
+    result = allocate_usage(batches, d("4"), AS_OF, MONDAY_8AM)
+
+    assert result == FefoResult(allocations((DEFAULT_ID, "4")), shortfall=d("0"))
 
 
 # Invalid input
@@ -159,43 +190,43 @@ def test_item_without_batch_tracking_uses_only_its_default_batch() -> None:
 
 def test_no_default_batch_is_rejected() -> None:
     with pytest.raises(ValueError, match="exactly one default batch"):
-        allocate_usage([batch(A, "10")], d("1"), AS_OF)
+        allocate_usage([batch(A, "10")], d("1"), AS_OF, USED_AT)
 
 
 def test_two_default_batches_are_rejected() -> None:
     second = replace(default_batch(), id=A)
     with pytest.raises(ValueError, match="exactly one default batch"):
-        allocate_usage([default_batch(), second], d("1"), AS_OF)
+        allocate_usage([default_batch(), second], d("1"), AS_OF, USED_AT)
 
 
 @pytest.mark.parametrize("quantity", ["0", "0.000", "-1"])
 def test_zero_or_negative_quantity_is_rejected(quantity: str) -> None:
     with pytest.raises(ValueError, match="positive"):
-        allocate_usage([default_batch()], d(quantity), AS_OF)
+        allocate_usage([default_batch()], d(quantity), AS_OF, USED_AT)
 
 
 @pytest.mark.parametrize("quantity", ["NaN", "sNaN", "Infinity", "-Infinity"])
 def test_non_finite_quantity_is_rejected(quantity: str) -> None:
     with pytest.raises(ValueError, match="finite"):
-        allocate_usage([default_batch()], d(quantity), AS_OF)
+        allocate_usage([default_batch()], d(quantity), AS_OF, USED_AT)
 
 
 @pytest.mark.parametrize("quantity", ["0.0005", "2.0015", "1E+30"])
 def test_quantity_with_more_than_three_decimals_is_rejected(quantity: str) -> None:
     """1E+30 can't be quantized to 0.001 within Decimal's 28 digits."""
     with pytest.raises(ValueError, match="three decimal places"):
-        allocate_usage([default_batch()], d(quantity), AS_OF)
+        allocate_usage([default_batch()], d(quantity), AS_OF, USED_AT)
 
 
 def test_trailing_zeros_beyond_three_decimals_are_accepted() -> None:
-    result = allocate_usage([default_batch("5")], d("1.5000"), AS_OF)
+    result = allocate_usage([default_batch("5")], d("1.5000"), AS_OF, USED_AT)
 
     assert result.allocations == allocations((DEFAULT_ID, "1.5"))
 
 
 def test_float_quantity_is_rejected() -> None:
     with pytest.raises(TypeError, match="Decimal"):
-        allocate_usage([default_batch()], 1.5, AS_OF)  # type: ignore[arg-type]
+        allocate_usage([default_batch()], 1.5, AS_OF, USED_AT)  # type: ignore[arg-type]
 
 
 # Properties
@@ -251,7 +282,7 @@ def taken(result: FefoResult) -> dict[UUID, Decimal]:
 
 @given(item_batches(), quantities)
 def test_allocations_sum_exactly_to_quantity(batches: list[BatchSnapshot], qty: Decimal) -> None:
-    result = allocate_usage(batches, qty, AS_OF)
+    result = allocate_usage(batches, qty, AS_OF, USED_AT)
 
     assert sum(a.quantity for a in result.allocations) == qty
 
@@ -260,7 +291,7 @@ def test_allocations_sum_exactly_to_quantity(batches: list[BatchSnapshot], qty: 
 def test_allocations_are_positive_known_and_unique(
     batches: list[BatchSnapshot], qty: Decimal
 ) -> None:
-    result = allocate_usage(batches, qty, AS_OF)
+    result = allocate_usage(batches, qty, AS_OF, USED_AT)
     ids = [a.batch_id for a in result.allocations]
 
     assert all(a.quantity > 0 for a in result.allocations)
@@ -272,7 +303,7 @@ def test_allocations_are_positive_known_and_unique(
 def test_batches_give_at_most_their_stock_and_unusable_ones_give_nothing(
     batches: list[BatchSnapshot], qty: Decimal
 ) -> None:
-    took = taken(allocate_usage(batches, qty, AS_OF))
+    took = taken(allocate_usage(batches, qty, AS_OF, USED_AT))
 
     for b in batches:
         if b.is_default:
@@ -287,7 +318,7 @@ def test_batches_give_at_most_their_stock_and_unusable_ones_give_nothing(
 def test_fefo_every_batch_before_the_last_one_drawn_is_used_up(
     batches: list[BatchSnapshot], qty: Decimal
 ) -> None:
-    result = allocate_usage(batches, qty, AS_OF)
+    result = allocate_usage(batches, qty, AS_OF, USED_AT)
     order = fefo_order(batches)
     drawn = [a.batch_id for a in result.allocations if a.batch_id != the_default(batches).id]
 
@@ -303,7 +334,7 @@ def test_fefo_every_batch_before_the_last_one_drawn_is_used_up(
 def test_default_batch_is_drawn_last_and_only_for_a_shortfall(
     batches: list[BatchSnapshot], qty: Decimal
 ) -> None:
-    result = allocate_usage(batches, qty, AS_OF)
+    result = allocate_usage(batches, qty, AS_OF, USED_AT)
     default = the_default(batches)
     usable_stock = sum((b.on_hand for b in fefo_order(batches)), Decimal(0))
     took = taken(result)
@@ -322,12 +353,12 @@ def test_input_order_does_not_matter_and_input_is_not_modified(
     batches: list[BatchSnapshot], qty: Decimal, rng: random.Random
 ) -> None:
     before = list(batches)
-    result = allocate_usage(batches, qty, AS_OF)
+    result = allocate_usage(batches, qty, AS_OF, USED_AT)
     assert batches == before
 
     shuffled = list(batches)
     rng.shuffle(shuffled)
-    assert allocate_usage(shuffled, qty, AS_OF) == result
+    assert allocate_usage(shuffled, qty, AS_OF, USED_AT) == result
 
 
 def apply(batches: list[BatchSnapshot], result: FefoResult) -> list[BatchSnapshot]:
@@ -340,9 +371,9 @@ def apply(batches: list[BatchSnapshot], result: FefoResult) -> list[BatchSnapsho
 def test_two_draws_take_the_same_from_each_batch_as_one(
     batches: list[BatchSnapshot], qty_a: Decimal, qty_b: Decimal
 ) -> None:
-    first = allocate_usage(batches, qty_a, AS_OF)
-    second = allocate_usage(apply(batches, first), qty_b, AS_OF)
-    combined = allocate_usage(batches, qty_a + qty_b, AS_OF)
+    first = allocate_usage(batches, qty_a, AS_OF, USED_AT)
+    second = allocate_usage(apply(batches, first), qty_b, AS_OF, USED_AT)
+    combined = allocate_usage(batches, qty_a + qty_b, AS_OF, USED_AT)
 
     split_total: dict[UUID, Decimal] = {}
     for result in (first, second):
@@ -350,3 +381,22 @@ def test_two_draws_take_the_same_from_each_batch_as_one(
             split_total[batch_id] = split_total.get(batch_id, Decimal(0)) + quantity
 
     assert split_total == taken(combined)
+
+
+# Usage times from half an hour before the first received_at to an hour after
+# the last, so some batches arrive before the usage, some at it, some after.
+usage_times = st.sampled_from([MONDAY_8AM + timedelta(minutes=30 * k) for k in range(-1, 7)])
+
+
+@given(item_batches(), quantities, usage_times)
+def test_batches_received_after_the_usage_are_skipped(
+    batches: list[BatchSnapshot], qty: Decimal, used_at: datetime
+) -> None:
+    result = allocate_usage(batches, qty, AS_OF, used_at)
+
+    later = {b.id for b in batches if not b.is_default and b.received_at > used_at}
+    assert later.isdisjoint(taken(result))
+    # The same as if the later batches weren't there; the default batch stays
+    # whenever it was created.
+    earlier = [b for b in batches if b.is_default or b.received_at <= used_at]
+    assert result == allocate_usage(earlier, qty, AS_OF, used_at)

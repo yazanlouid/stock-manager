@@ -13,7 +13,7 @@ the API request, the simulator or the test owns the transaction. Each one
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from uuid import UUID
 
@@ -288,6 +288,11 @@ def _check_timestamp(value: datetime, name: str) -> None:
         raise TypeError(f"{name} must be a datetime, not {type(value).__name__}")
     if value.utcoffset() is None:
         raise DomainError(f"{name} must include a timezone")
+
+
+def iso_utc(value: datetime) -> str:
+    """A timestamp for an error message, in UTC: 2026-11-02T07:30:00Z."""
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _blank_to_none(value: str | None) -> str | None:
@@ -604,7 +609,8 @@ def use(
     """Use quantity of an item at a location, drawing batches earliest expiry first.
 
     allocate_usage (fefo.py) decides the split (domain rules 2 to 5), skipping
-    batches that expired before occurred_at's local date (rule 3). Each usage
+    batches received after occurred_at (D50) and batches that expired before
+    occurred_at's local date (rule 3). Each usage
     movement copies its batch's current unit_cost (rule 7), which is NULL for a
     default batch that has never received anything.
     """
@@ -635,7 +641,7 @@ def use(
             StockBalance.qty_on_hand > 0,
         ),
     ]
-    result = allocate_usage([b.snapshot() for b in batches], quantity, as_of)
+    result = allocate_usage([b.snapshot() for b in batches], quantity, as_of, occurred_at)
 
     by_id = {b.id: b for b in batches}
     ledger = _Ledger(session, business_id, client_id, source, user_id)
@@ -667,7 +673,9 @@ def waste(
     A batch-tracked item must name the batch. An item without batch tracking
     wastes from its default batch, so batch_id is None or that batch's id.
     Expired batches can be wasted (that is how they leave stock), but waste
-    can't exceed the batch's on-hand, so it never takes a batch negative.
+    can't exceed the batch's on-hand, so it never takes a batch negative, and
+    can't name a batch received after occurred_at (D50). A default batch's
+    received_at is when it was created, so that rule never applies to it.
     """
     check_quantity(quantity)
     _check_timestamp(occurred_at, "occurred_at")
@@ -705,6 +713,11 @@ def waste(
         if not found:
             raise DomainError(f"batch {batch_id} not found for item {item.sku} at this location")
         batch = found[0]
+        if batch.received_at > occurred_at:
+            raise DomainError(
+                f"batch {batch_id} was received at {iso_utc(batch.received_at)},"
+                f" after the waste's occurred_at {iso_utc(occurred_at)}"
+            )
 
     if quantity > batch.on_hand:
         raise DomainError(f"can't waste {quantity}: the batch has {batch.on_hand} on hand")

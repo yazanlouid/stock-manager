@@ -2,8 +2,8 @@
 
 This is a pure function over snapshots. It never touches the database or the
 clock: the caller loads one item's batches at one location (locked with
-SELECT ... FOR UPDATE), passes the usage's local date as as_of, and writes one
-usage movement per allocation, in the order returned.
+SELECT ... FOR UPDATE), passes the usage's occurred_at and its local date as
+as_of, and writes one usage movement per allocation, in the order returned.
 """
 
 from collections.abc import Sequence
@@ -46,20 +46,31 @@ class FefoResult:
     shortfall: Decimal
 
 
-def allocate_usage(batches: Sequence[BatchSnapshot], quantity: Decimal, as_of: date) -> FefoResult:
+def allocate_usage(
+    batches: Sequence[BatchSnapshot], quantity: Decimal, as_of: date, occurred_at: datetime
+) -> FefoResult:
     """Split a usage of `quantity` across one item's batches, earliest expiry first.
 
-    Usable batches are the non-default ones with stock on hand that haven't
-    expired: a batch is usable on its expiry date and skipped from the next day.
-    They are drawn in order of expires_on (no date last), then received_at, then
-    id. Whatever they can't cover goes to the default batch, last, even if that
-    takes it negative.
+    Usable batches are the non-default ones with stock on hand that were
+    received at or before the usage's occurred_at (D50) and haven't expired: a
+    batch is usable on its expiry date and skipped from the next day. They are
+    drawn in order of expires_on (no date last), then received_at, then id.
+    Whatever they can't cover goes to the default batch, last, even if that
+    takes it negative. The default batch is always available, whenever it was
+    created.
     """
     check_quantity(quantity)
     default = _default_batch(batches)
 
     usable = sorted(
-        (b for b in batches if not b.is_default and b.on_hand > 0 and _not_expired(b, as_of)),
+        (
+            b
+            for b in batches
+            if not b.is_default
+            and b.on_hand > 0
+            and b.received_at <= occurred_at
+            and _not_expired(b, as_of)
+        ),
         key=_fefo_key,
     )
 

@@ -226,9 +226,12 @@ class StockLedgerMachine(RuleBasedStateMachine):
                 BatchSnapshot(NEW_DEFAULT, None, occurred_at, Decimal(0), True), None
             )
         # Rules 2 and 3: the split is FEFO over the balances just before the
-        # usage, as of its date in Amman.
+        # usage, as of its date in Amman, from batches received by then (D50).
         expected = allocate_usage(
-            [s.batch for s in before.values()], quantity, (occurred_at + AMMAN_OFFSET).date()
+            [s.batch for s in before.values()],
+            quantity,
+            (occurred_at + AMMAN_OFFSET).date(),
+            occurred_at,
         )
 
         client_id = uuid.uuid4()
@@ -270,6 +273,7 @@ class StockLedgerMachine(RuleBasedStateMachine):
         # Sometimes more than the batch holds, which must be refused.
         quantity = data.draw(thousandths(1, int(target.batch.on_hand * 1000) + 500))
         batch_id = target.batch.id if item.tracks_batches else None
+        occurred_at = self.at(hour)
 
         client_id = uuid.uuid4()
         call = partial(
@@ -281,10 +285,18 @@ class StockLedgerMachine(RuleBasedStateMachine):
             batch_id=batch_id,
             quantity=quantity,
             reason=reason,
-            occurred_at=self.at(hour),
+            occurred_at=occurred_at,
             client_id=client_id,
             source="simulator",
         )
+        # D50: waste can't name a batch received after it. A default batch's
+        # received_at is when it was created, so the rule never applies to it.
+        if not target.batch.is_default and target.batch.received_at > occurred_at:
+            count = self.movement_count()
+            with pytest.raises(DomainError, match="received at"):
+                call()
+            assert self.movement_count() == count
+            return
         if quantity > target.batch.on_hand:
             count = self.movement_count()
             with pytest.raises(DomainError, match="on hand"):
