@@ -54,10 +54,11 @@ If a command stops matching the code, fix the code or update this section in the
 3. Domain functions never commit. The API request, the simulator or the test owns the transaction. The API commits in `get_db` (D42), when the endpoint returns, and rolls back when it raises; endpoints never commit.
 4. Quantities are in the item's base unit (g, ml or piece) as numeric(14,3), and money is numeric(14,3), except `unit_cost`, which is per base unit and numeric(18,6) (the `UnitCost` type in `app/models/columns.py`). Use `Decimal` in Python, never floats.
 5. Every table has `business_id` and every query is scoped by it. Stock rows also carry `location_id`. Endpoints take `business_id` only from the `CurrentBusiness` dependency (D43), never from a body or path.
-6. FEFO order is `expires_on` ascending with no date last, then `received_at`, then `id`; the default batch always comes last and takes whatever remains. Skip expired batches. A shortfall posts to the item's default batch, which may go negative; the negative-stock alert arrives with the alerts work in week 2. See domain rules 2–5 in `docs/schema.md`.
+6. FEFO order is `expires_on` ascending with no date last, then `received_at`, then `id`; the default batch always comes last and takes whatever remains. Skip expired batches and batches received after the usage's `occurred_at` (D50). A shortfall posts to the item's default batch, which may go negative; the negative-stock alert arrives with the alerts work in week 2. See domain rules 2–5 in `docs/schema.md`.
 7. Every movement has a `type` and a `source` (manual, count or simulator). Recipes are out of scope for v1: don't add products, recipe or sales tables.
 8. Timestamps are timestamptz. Primary keys default to Postgres 18's `uuidv7()`.
 9. No secrets in the repo. Config comes from `.env` (gitignored); `.env.example` is committed.
+10. A count is a barrier per item and location (D51): it must be dated at or after the item's latest movement there, and no write for that item there may then be dated at or before it. Counts post their differences as count_adjust movements, with source count from the API (D56). See domain rule 9 in `docs/schema.md`.
 
 ## Testing
 

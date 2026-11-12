@@ -1,10 +1,16 @@
-"""Documents: goods receipts and their lines."""
+"""Documents: goods receipts and stock counts, and their lines."""
 
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, ForeignKey, ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -83,4 +89,77 @@ class ReceiptLine(Base):
     expires_on: Mapped[date | None]
     lot_code: Mapped[str | None]
     batch_id: Mapped[uuid.UUID]
+    created_at: Mapped[CreatedAt]
+
+
+class StockCount(Base):
+    """A stocktake of some items at one location, sent as one request (D55).
+
+    It has no movements of its own: each line whose counted quantity differs
+    from what was expected posts one count_adjust movement.
+    """
+
+    __tablename__ = "stock_counts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["business_id", "location_id"], ["locations.business_id", "locations.id"]
+        ),
+        ForeignKeyConstraint(["business_id", "user_id"], ["users.business_id", "users.id"]),
+        # A retry finds the count by its client_id, even one that posted nothing.
+        UniqueConstraint("business_id", "client_id"),
+        # Target for the lines' count key, so a line is at its count's location.
+        UniqueConstraint("business_id", "id", "location_id"),
+    )
+
+    id: Mapped[UuidPk]
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"))
+    location_id: Mapped[uuid.UUID]
+    # No default: the simulator replays past days, so the caller always sets it.
+    counted_at: Mapped[datetime]
+    # Identifies the request; its count_adjust movements share it.
+    client_id: Mapped[uuid.UUID]
+    # NULL for simulator counts, as on movements.
+    user_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[CreatedAt]
+
+
+class StockCountLine(Base):
+    """One batch a count covers: what the ledger expected and what was counted (D54)."""
+
+    __tablename__ = "stock_count_lines"
+    __table_args__ = (
+        # expected_qty has no sign check: a default batch may be negative.
+        CheckConstraint("counted_qty >= 0", name="counted_qty_non_negative"),
+        # The line is at its count's location, in the same business. Named by
+        # hand: the convention's name is longer than Postgres's 63 characters.
+        ForeignKeyConstraint(
+            ["business_id", "count_id", "location_id"],
+            ["stock_counts.business_id", "stock_counts.id", "stock_counts.location_id"],
+            name="fk_stock_count_lines_count",
+        ),
+        # The batch is the line's item at the line's location, in this business.
+        # This also covers the items and locations keys, so there are none.
+        ForeignKeyConstraint(
+            ["business_id", "location_id", "item_id", "batch_id"],
+            ["batches.business_id", "batches.location_id", "batches.item_id", "batches.id"],
+            name="fk_stock_count_lines_batch",
+        ),
+        # One line per batch per count.
+        UniqueConstraint("count_id", "batch_id"),
+        # Target for the movement's count-line key, so a count_adjust posts to
+        # this line's batch.
+        UniqueConstraint("business_id", "id", "batch_id"),
+        # The count barrier (D51): the latest count of an item at a location.
+        Index("ix_stock_count_lines_location_item", "location_id", "item_id"),
+    )
+
+    id: Mapped[UuidPk]
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id"))
+    count_id: Mapped[uuid.UUID]
+    location_id: Mapped[uuid.UUID]
+    item_id: Mapped[uuid.UUID]
+    batch_id: Mapped[uuid.UUID]
+    # The batch's balance when the count was posted, in the item's base unit.
+    expected_qty: Mapped[Decimal]
+    counted_qty: Mapped[Decimal]
     created_at: Mapped[CreatedAt]

@@ -25,12 +25,15 @@ from tests.builders import (
     assert_statement_rejected,
     new_balance,
     new_batch,
+    new_count_adjust,
+    new_count_line,
     new_default_batch,
     new_location,
     new_movement,
     new_receipt,
     new_receipt_line,
     new_receive,
+    new_stock_count,
     new_unit,
 )
 
@@ -51,6 +54,10 @@ def test_valid_stock_rows_get_server_defaults(db_session: Session, stock: Stock)
     assert stock.default_batch.received_at == stock.default_batch.created_at
     assert stock.default_batch.unit_cost is None
 
+    assert stock.count.id.version == 7
+    assert stock.count.user_id is None  # simulator counts have no user
+    assert stock.count_line.created_at.tzinfo is not None
+
 
 def test_unit_cost_keeps_six_decimals(db_session: Session, stock: Stock) -> None:
     for row in (stock.batch, stock.line, stock.usage):
@@ -67,14 +74,21 @@ def test_boundary_values_are_accepted(db_session: Session, stock: Stock) -> None
     # A default batch may be costed (after a receipt), and a balance may go negative.
     add(db_session, new_default_batch(c.location, stock.flour, unit_cost=Decimal("0.4")))
     add(db_session, new_balance(stock.default_batch, qty_on_hand=Decimal("-250")))
+    # A count line may expect a negative default batch and find nothing.
+    add(
+        db_session,
+        new_count_line(
+            stock.count, stock.default_batch, expected_qty=Decimal("-250"), counted_qty=Decimal("0")
+        ),
+    )
 
 
 @pytest.mark.parametrize("qty", [Decimal("5"), Decimal("-5")])
-@pytest.mark.parametrize("movement_type", ["count_adjust", "settle"])
 def test_count_adjust_and_settle_take_either_sign(
-    db_session: Session, stock: Stock, movement_type: str, qty: Decimal
+    db_session: Session, stock: Stock, qty: Decimal
 ) -> None:
-    add(db_session, new_movement(stock.batch, type=movement_type, qty_delta=qty))
+    add(db_session, new_count_adjust(stock.batch, stock.count_line, qty_delta=qty))
+    add(db_session, new_movement(stock.batch, type="settle", qty_delta=qty))
 
 
 def test_movement_without_user_or_cost_is_accepted(db_session: Session, stock: Stock) -> None:
@@ -141,7 +155,7 @@ BAD_ROWS: list[Any] = [
         id="movement-source",
     ),
     pytest.param(
-        lambda s: new_movement(s.batch, type="count_adjust", qty_delta=Decimal("0")),
+        lambda s: new_movement(s.batch, type="settle", qty_delta=Decimal("0")),
         "ck_stock_movements_qty_delta_non_zero",
         id="qty-delta-zero",
     ),
@@ -199,6 +213,16 @@ BAD_ROWS: list[Any] = [
         lambda s: new_movement(s.batch, receipt_line_id=s.line.id),
         "ck_stock_movements_receipt_line_id_iff_receive",
         id="usage-with-receipt-line",
+    ),
+    pytest.param(
+        lambda s: new_movement(s.batch, type="count_adjust", qty_delta=Decimal("5")),
+        "ck_stock_movements_stock_count_line_id_iff_count_adjust",
+        id="count-adjust-without-count-line",
+    ),
+    pytest.param(
+        lambda s: new_movement(s.batch, stock_count_line_id=s.count_line.id),
+        "ck_stock_movements_stock_count_line_id_iff_count_adjust",
+        id="usage-with-count-line",
     ),
     pytest.param(
         lambda s: new_movement(s.batch, unit_cost=Decimal("-0.000001")),
@@ -282,6 +306,43 @@ BAD_ROWS: list[Any] = [
         lambda s: new_receipt_line(s.receipt, s.cat.unit, s.batch, receipt_id=uuid.uuid4()),
         "fk_receipt_lines_business_id_receipt_id_receipts",
         id="line-unknown-receipt",
+    ),
+    # stock_counts
+    pytest.param(
+        lambda s: new_stock_count(s.cat.location, client_id=s.count.client_id),
+        "uq_stock_counts_business_id_client_id",
+        id="repeated-count-client-id",
+    ),
+    pytest.param(
+        lambda s: new_stock_count(s.cat.location, location_id=uuid.uuid4()),
+        "fk_stock_counts_business_id_location_id_locations",
+        id="count-unknown-location",
+    ),
+    pytest.param(
+        lambda s: new_stock_count(s.cat.location, user_id=uuid.uuid4()),
+        "fk_stock_counts_business_id_user_id_users",
+        id="count-unknown-user",
+    ),
+    # stock_count_lines
+    pytest.param(
+        lambda s: new_count_line(s.count, s.default_batch, counted_qty=Decimal("-0.001")),
+        "ck_stock_count_lines_counted_qty_non_negative",
+        id="counted-qty-negative",
+    ),
+    pytest.param(
+        lambda s: new_count_line(s.count, s.batch),
+        "uq_stock_count_lines_count_id_batch_id",
+        id="second-line-for-batch",
+    ),
+    pytest.param(
+        lambda s: new_count_line(s.count, s.default_batch, count_id=uuid.uuid4()),
+        "fk_stock_count_lines_count",
+        id="count-line-unknown-count",
+    ),
+    pytest.param(
+        lambda s: new_count_line(s.count, s.default_batch, item_id=s.flour.id),
+        "fk_stock_count_lines_batch",
+        id="count-line-item-not-batch-item",
     ),
 ]
 
@@ -439,6 +500,87 @@ def test_receipt_line_cannot_use_another_business_receipt(
     assert_rejected(db_session, row, "fk_receipt_lines_business_id_receipt_id_receipts")
 
 
+# --- Stock counts, their lines and count adjustments ---------------------------
+
+
+def test_count_adjust_for_its_line_is_accepted(db_session: Session, stock: Stock) -> None:
+    add(db_session, new_count_adjust(stock.batch, stock.count_line))
+
+
+def test_count_line_cannot_get_a_second_count_adjust(db_session: Session, stock: Stock) -> None:
+    add(db_session, new_count_adjust(stock.batch, stock.count_line))
+    row = new_count_adjust(stock.batch, stock.count_line, client_seq=1)
+    assert_rejected(db_session, row, "uq_stock_movements_stock_count_line_id")
+
+
+def test_count_adjust_must_post_to_its_line_batch(db_session: Session, stock: Stock) -> None:
+    # Same item and location, so only the count-line key fails.
+    row = new_count_adjust(stock.default_batch, stock.count_line)
+    assert_rejected(db_session, row, "fk_stock_movements_stock_count_line")
+
+
+def test_count_adjust_cannot_use_another_business_line(
+    db_session: Session, stock: Stock, other_stock: Stock
+) -> None:
+    # A valid movement in the other business, pointing at this business's line.
+    row = new_count_adjust(other_stock.batch, stock.count_line)
+    assert_rejected(db_session, row, "fk_stock_movements_stock_count_line")
+
+
+def test_count_line_must_be_at_its_count_location(db_session: Session, stock: Stock) -> None:
+    c = stock.cat
+    store = add(db_session, new_location(c.business.id, name="Storeroom", kind="storeroom"))
+    store_batch = add(db_session, new_batch(store, c.item))
+    # The batch is at the line's location, so only the count key fails.
+    row = new_count_line(stock.count, store_batch, location_id=store.id)
+    assert_rejected(db_session, row, "fk_stock_count_lines_count")
+
+
+def test_count_line_cannot_use_another_business_count(
+    db_session: Session, stock: Stock, other_stock: Stock
+) -> None:
+    # The batch key holds (this business's batch at this location), so only
+    # the count key fails.
+    row = new_count_line(
+        other_stock.count,
+        stock.default_batch,
+        business_id=stock.cat.business.id,
+        location_id=stock.cat.location.id,
+    )
+    assert_rejected(db_session, row, "fk_stock_count_lines_count")
+
+
+def test_count_line_cannot_use_another_business_batch(
+    db_session: Session, stock: Stock, other_stock: Stock
+) -> None:
+    row = new_count_line(stock.count, other_stock.batch, item_id=stock.cat.item.id)
+    assert_rejected(db_session, row, "fk_stock_count_lines_batch")
+
+
+def test_count_cannot_use_another_business_location(
+    db_session: Session, stock: Stock, other: Catalogue
+) -> None:
+    row = new_stock_count(other.location, business_id=stock.cat.business.id)
+    assert_rejected(db_session, row, "fk_stock_counts_business_id_location_id_locations")
+
+
+def test_count_cannot_name_another_business_user(
+    db_session: Session, stock: Stock, other: Catalogue
+) -> None:
+    row = new_stock_count(stock.cat.location, user_id=other.user.id)
+    assert_rejected(db_session, row, "fk_stock_counts_business_id_user_id_users")
+
+
+def test_count_by_a_user_of_the_business_is_accepted(db_session: Session, stock: Stock) -> None:
+    add(db_session, new_stock_count(stock.cat.location, user_id=stock.cat.user.id))
+
+
+def test_same_count_client_id_in_another_business_is_accepted(
+    db_session: Session, stock: Stock, other: Catalogue
+) -> None:
+    add(db_session, new_stock_count(other.location, client_id=stock.count.client_id))
+
+
 # --- Receipts -----------------------------------------------------------------
 
 
@@ -521,6 +663,7 @@ def test_same_client_id_and_seq_in_another_business_is_accepted(
         ("stock_movements", "client_seq"),
         ("batches", "received_at"),
         ("receipts", "received_at"),
+        ("stock_counts", "counted_at"),
     ],
 )
 def test_caller_set_columns_have_no_default(db_session: Session, table: str, column: str) -> None:

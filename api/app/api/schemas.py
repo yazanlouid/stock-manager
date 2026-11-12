@@ -109,6 +109,28 @@ class ReversalIn(RequestModel):
     original_client_id: UUID
 
 
+class CountBatchIn(RequestModel):
+    batch_id: UUID
+    # In the item's base unit; zero or more.
+    counted_qty: Decimal
+
+
+class CountItemIn(RequestModel):
+    item_id: UUID
+    # For an item without batch tracking: what was counted, in its base unit.
+    counted_qty: Decimal | None = None
+    # For a batch-tracked item: the batches found. Every other batch counts as
+    # zero, so an empty list means none was found (D54).
+    batches: list[CountBatchIn] | None = None
+
+
+class CountIn(RequestModel):
+    client_id: UUID
+    location_id: UUID
+    counted_at: AwareDatetime
+    items: list[CountItemIn]
+
+
 # --- Write responses -----------------------------------------------------------
 
 
@@ -125,6 +147,7 @@ class MovementOut(ResponseModel):
     reason: str | None
     unit_cost: UnitCost | None
     receipt_line_id: UUID | None
+    stock_count_line_id: UUID | None
     reverses_id: UUID | None
     occurred_at: Timestamp
     client_id: UUID
@@ -159,6 +182,33 @@ class ReceiptResponse(MovementsResponse):
 class UsageResponse(MovementsResponse):
     # How far the default batch went negative; null for a replay.
     shortfall: Quantity | None
+
+
+class CountOut(ResponseModel):
+    id: UUID
+    location_id: UUID
+    counted_at: Timestamp
+    created_at: Timestamp
+
+
+class CountLineOut(ResponseModel):
+    """One batch the count covered. Quantities are in the item's base unit."""
+
+    id: UUID
+    item_id: UUID
+    batch_id: UUID
+    # The batch's balance at counted_at; negative only for a default batch.
+    expected_qty: Quantity
+    counted_qty: Quantity
+
+
+class CountResponse(MovementsResponse):
+    """The count, its lines by item SKU and then in FEFO order with the default
+    batch last, and one count_adjust per line whose counted_qty differs from
+    its expected_qty."""
+
+    count: CountOut
+    lines: list[CountLineOut]
 
 
 # --- GET /stock ----------------------------------------------------------------

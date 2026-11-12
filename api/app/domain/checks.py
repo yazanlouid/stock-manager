@@ -30,6 +30,17 @@ def check_money(amount: Decimal, name: str = "amount") -> None:
     _check_step(amount, name)
 
 
+def check_counted_quantity(quantity: Decimal, name: str = "counted_qty") -> None:
+    """A counted quantity is a finite Decimal, zero or more, with at most three decimals.
+
+    Zero is a count too: nothing was found.
+    """
+    _check_decimal(quantity, name)
+    if quantity < 0:
+        raise DomainError(f"{name} must not be negative, got {quantity}")
+    _check_step(quantity, name)
+
+
 def _check_decimal(value: Decimal, name: str) -> None:
     if not isinstance(value, Decimal):
         raise TypeError(f"{name} must be a Decimal, not {type(value).__name__}")

@@ -15,21 +15,26 @@ from decimal import Decimal
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.reconcile import reconcile
 from app.domain.stock import ReceiptLineInput, receive, reverse, use, waste
 from app.models import StockBalance
 from tests.builders import (
+    COUNTED_AT,
     OCCURRED_AT,
     Catalogue,
     add,
     new_balance,
     new_batch,
+    new_count_adjust,
+    new_count_line,
     new_default_batch,
     new_item,
     new_movement,
     new_receipt,
     new_receipt_line,
     new_receive,
+    new_stock_count,
     new_unit,
 )
 
@@ -103,6 +108,16 @@ def test_a_ledger_built_by_the_domain_functions_reconciles(db_session: Session, 
         db_session, business_id, location_id=location_id, item_id=flour.id, batch_id=None,
         quantity=Decimal("50"), reason="damaged", occurred_at=at(2, 12),
         client_id=uuid.uuid4(), source="manual",
+    )  # fmt: skip
+
+    # Counts: milk by batch (one found short, the rest zeroed), flour by weight.
+    count_stock(
+        db_session, business_id, location_id=location_id, counted_at=at(3, 20),
+        items=[
+            CountItemInput(cat.item.id, batches=[BatchCountInput(wasted_from, Decimal("1500"))]),
+            CountItemInput(flour.id, counted_qty=Decimal("3600")),
+        ],
+        client_id=uuid.uuid4(), source="count",
     )  # fmt: skip
 
     assert reconcile(db_session, business_id) == []
@@ -183,6 +198,53 @@ def test_a_receive_movement_with_the_wrong_cost(db_session: Session, cat: Catalo
 
     assert [p.kind for p in problems] == ["receipt_line_mismatch"]
     assert "0.000900" in problems[0].message
+
+
+def build_count_line(db: Session, cat: Catalogue, expected: str, counted: str):
+    """A default batch with its balance, and a count line for it with no movement yet."""
+    batch = add(db, new_default_batch(cat.location, cat.item))
+    count = add(db, new_stock_count(cat.location))
+    quantities = {"expected_qty": Decimal(expected), "counted_qty": Decimal(counted)}
+    line = add(db, new_count_line(count, batch, **quantities))
+    return batch, line
+
+
+def test_a_count_line_without_its_count_adjust(db_session: Session, cat: Catalogue):
+    batch, _ = build_count_line(db_session, cat, "0", "300")
+    add(db_session, new_balance(batch))
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["count_line_unposted"]
+    assert "expected 0.000 and counted 300.000" in problems[0].message
+
+
+def test_a_count_line_counted_as_expected_needs_no_count_adjust(
+    db_session: Session, cat: Catalogue
+):
+    batch, _ = build_count_line(db_session, cat, "0", "0")
+    add(db_session, new_balance(batch))
+
+    assert kinds(db_session, cat) == []
+
+
+def test_a_count_adjust_with_the_wrong_quantity(db_session: Session, cat: Catalogue):
+    batch, line = build_count_line(db_session, cat, "0", "300")
+    add(db_session, new_count_adjust(batch, line, qty_delta=Decimal("200")))
+    add(db_session, new_balance(batch, qty_on_hand=Decimal("200"), last_movement_at=COUNTED_AT))
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["count_line_mismatch"]
+    assert "is 200.000" in problems[0].message
+
+
+def test_a_count_adjust_for_a_line_counted_as_expected(db_session: Session, cat: Catalogue):
+    batch, line = build_count_line(db_session, cat, "300", "300")
+    add(db_session, new_count_adjust(batch, line, qty_delta=Decimal("5")))
+    add(db_session, new_balance(batch, qty_on_hand=Decimal("5"), last_movement_at=COUNTED_AT))
+
+    assert kinds(db_session, cat) == ["count_line_mismatch"]
 
 
 def test_problems_are_scoped_to_the_business(db_session: Session, cat: Catalogue, other: Catalogue):

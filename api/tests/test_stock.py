@@ -28,7 +28,7 @@ from app.domain.stock import (
     waste,
 )
 from app.models import Batch, Item, ItemUnit, ReceiptLine, StockBalance, StockMovement
-from tests.builders import RECEIVED_AT, Catalogue, add, new_item, new_unit
+from tests.builders import RECEIVED_AT, Catalogue, add, new_unit
 
 
 def d(value: str) -> Decimal:
@@ -44,22 +44,6 @@ NOV_10_NOON = nov(10)
 
 
 # --- Fixtures and helpers -------------------------------------------------------
-
-
-@pytest.fixture
-def flour(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
-    """An item without batch tracking, bought by the 25 kg sack."""
-    item = add(db_session, new_item(cat.business.id, name="Flour", base_unit="g"))
-    return item, add(db_session, new_unit(item, name="sack", factor_to_base=d("25000")))
-
-
-@pytest.fixture
-def eggs(db_session: Session, cat: Catalogue) -> tuple[Item, ItemUnit]:
-    """An item that tracks batches but not expiry, bought by the tray of 30."""
-    item = add(
-        db_session, new_item(cat.business.id, name="Eggs", base_unit="piece", tracks_batches=True)
-    )
-    return item, add(db_session, new_unit(item, name="tray", factor_to_base=d("30")))
 
 
 def line(
@@ -358,7 +342,64 @@ def test_a_shortfall_takes_the_default_batch_negative(db_session: Session, cat: 
     assert_reconciled(db_session, cat)
 
 
+def test_a_usage_dated_before_a_delivery_skips_its_batch(
+    db_session: Session, cat: Catalogue
+) -> None:
+    received = do_receive(db_session, cat, milk(cat, "1"), received_at=nov(10, 9))
+    batch_id = received.movements[0].batch_id
+
+    # Logged for 08:59, before the 09:00 delivery: the batch holds stock, but
+    # the usage falls to the default batch as a shortfall (D50).
+    result = do_use(db_session, cat, cat.item, "300", occurred_at=nov(10, 8, 59))
+
+    default = default_batch(db_session, cat, cat.item)
+    assert [(m.batch_id, m.qty_delta) for m in result.movements] == [(default.id, d("-300"))]
+    assert result.shortfall == d("300")
+    assert on_hand(db_session, batch_id) == d("1000")
+    assert_reconciled(db_session, cat)
+
+
+def test_a_usage_at_a_delivery_s_received_at_draws_from_it(
+    db_session: Session, cat: Catalogue
+) -> None:
+    received = do_receive(db_session, cat, milk(cat, "1"), received_at=nov(10, 9))
+    batch_id = received.movements[0].batch_id
+
+    result = do_use(db_session, cat, cat.item, "300", occurred_at=nov(10, 9))
+
+    assert [(m.batch_id, m.qty_delta) for m in result.movements] == [(batch_id, d("-300"))]
+    assert result.shortfall == 0
+    assert_reconciled(db_session, cat)
+
+
 # --- Waste ----------------------------------------------------------------------
+
+
+def test_waste_of_a_batch_received_after_it_is_refused(db_session: Session, cat: Catalogue) -> None:
+    received = do_receive(db_session, cat, milk(cat, "1"), received_at=nov(10, 9))
+    before = movement_count(db_session, cat)
+
+    with pytest.raises(DomainError, match="received at 2026-11-10T09:00:00Z, after the waste"):
+        do_waste(
+            db_session, cat, cat.item, received.movements[0].batch_id, "100", occurred_at=nov(10, 8)
+        )
+
+    assert movement_count(db_session, cat) == before
+
+
+def test_an_untracked_item_s_waste_works_at_any_date(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+) -> None:
+    item, sack = flour
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(10, 9))
+
+    # The default batch was created on the real clock, after every date here,
+    # but D50 doesn't apply to it.
+    result = do_waste(db_session, cat, item, None, "500", occurred_at=nov(1))
+
+    default = default_batch(db_session, cat, item)
+    assert [(m.batch_id, m.qty_delta) for m in result.movements] == [(default.id, d("-500"))]
+    assert_reconciled(db_session, cat)
 
 
 def test_waste_beyond_on_hand_is_refused(db_session: Session, cat: Catalogue) -> None:

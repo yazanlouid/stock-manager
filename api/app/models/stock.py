@@ -113,6 +113,10 @@ class StockMovement(Base):
             "(type = 'receive') = (receipt_line_id IS NOT NULL)",
             name="receipt_line_id_iff_receive",
         ),
+        CheckConstraint(
+            "(type = 'count_adjust') = (stock_count_line_id IS NOT NULL)",
+            name="stock_count_line_id_iff_count_adjust",
+        ),
         CheckConstraint("unit_cost >= 0", name="unit_cost_non_negative"),
         CheckConstraint("client_seq >= 0", name="client_seq_non_negative"),
         # The movement's location and item are its batch's, in the same business.
@@ -128,6 +132,12 @@ class StockMovement(Base):
             ["business_id", "receipt_line_id", "batch_id"],
             ["receipt_lines.business_id", "receipt_lines.id", "receipt_lines.batch_id"],
             name="fk_stock_movements_receipt_line",
+        ),
+        # A count_adjust posts to its count line's own batch, in the same business.
+        ForeignKeyConstraint(
+            ["business_id", "stock_count_line_id", "batch_id"],
+            ["stock_count_lines.business_id", "stock_count_lines.id", "stock_count_lines.batch_id"],
+            name="fk_stock_movements_stock_count_line",
         ),
         ForeignKeyConstraint(
             ["business_id", "reverses_id"],
@@ -157,6 +167,8 @@ class StockMovement(Base):
     unit_cost: Mapped[UnitCost | None]
     # Unique: a receipt line gets at most one receive movement.
     receipt_line_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
+    # Unique: a count line gets at most one count_adjust movement.
+    stock_count_line_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
     # Unique: a movement can be reversed once (domain rule 6).
     reverses_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
     # When it happened, set by the caller; created_at is when the server wrote it.
