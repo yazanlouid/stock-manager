@@ -27,7 +27,7 @@ The ledger is the single source of truth: every other stock number is derived fr
 | Catalogue | suppliers | Who you buy from | name, phone, lead_time_days |
 | Catalogue | supplier_items | What each supplier sells | supplier_id, item_id, item_unit_id, pack_price, is_preferred |
 | Stock | batches | A received lot | location_id, item_id, expires_on, lot_code, unit_cost, received_at, is_default |
-| Stock | stock_movements | The ledger | location_id, item_id, batch_id, qty_delta, type, source, reason, unit_cost, receipt_line_id, reverses_id, occurred_at, user_id, client_id, client_seq |
+| Stock | stock_movements | The ledger | location_id, item_id, batch_id, qty_delta, type, source, reason, unit_cost, receipt_line_id, stock_count_line_id, reverses_id, occurred_at, user_id, client_id, client_seq |
 | Stock | stock_balances | On-hand per batch (projection) | batch_id, location_id, item_id, qty_on_hand, last_movement_at |
 | Documents | receipts, receipt_lines | Goods in | location_id, supplier_id, received_at, invoice_ref (po_id in week 2) · item_id, item_unit_id, qty_packs, qty_base, pack_price, unit_cost, expires_on, lot_code, batch_id |
 | Documents | stock_counts, stock_count_lines | Stocktakes | location_id, counted_at, client_id, user_id · location_id, item_id, batch_id, expected_qty, counted_qty |
