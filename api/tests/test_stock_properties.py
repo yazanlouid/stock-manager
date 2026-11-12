@@ -42,7 +42,7 @@ from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
-from app.models import Batch, ReceiptLine, StockBalance, StockCount, StockMovement
+from app.models import Batch, Item, ReceiptLine, StockBalance, StockCount, StockMovement
 from tests.builders import add, build_catalogue, new_item, new_unit
 
 # Asia/Amman (the test business's timezone) has been UTC+3 all year since
@@ -396,8 +396,9 @@ class StockLedgerMachine(RuleBasedStateMachine):
 
     @rule(index=ITEMS, hour=HOURS, minute=MINUTES, data=st.data())
     def count_items(self, index: int, hour: int, minute: int, data: st.DataObject) -> None:
+        """Any item, any subset of its batches, at any time of the current day,
+        so the barrier or a batch received later often refuses it."""
         item, _ = self.items[index]
-        counted_at = self.at(hour, minute)
         before = self.snapshots(item.id)
         if item.tracks_batches:
             others = sorted(
@@ -409,14 +410,89 @@ class StockLedgerMachine(RuleBasedStateMachine):
                 else st.just([])
             )
             counts = {s.batch.id: data.draw(thousandths(0, 3_000_000)) for s in named}
+            self.post_count(item, before, self.at(hour, minute), named, counts)
+        else:
+            counted_qty = data.draw(thousandths(0, 3_000_000))
+            self.post_count(item, before, self.at(hour, minute), [], {}, counted_qty)
+
+    def stocked_items(self) -> list[Item]:
+        """Batch-tracked items holding stock in two or more received batches.
+
+        One query, because Hypothesis evaluates the precondition at every step.
+        """
+        stocked = set(
+            self.db.scalars(
+                select(StockBalance.item_id)
+                .join(Batch, Batch.id == StockBalance.batch_id)
+                .where(
+                    StockBalance.business_id == self.business_id,
+                    StockBalance.location_id == self.cat.location.id,
+                    ~Batch.is_default,
+                    StockBalance.qty_on_hand > 0,
+                )
+                .group_by(StockBalance.item_id)
+                .having(func.count() >= 2)
+            )
+        )
+        return [item for item, _ in self.items if item.id in stocked]
+
+    @precondition(lambda self: self.stocked_items())
+    @rule(data=st.data())
+    def count_a_stocked_item(self, data: st.DataObject) -> None:
+        """Rule 9's main path: several batches with stock, all named but one,
+        which goes to zero along with the default batch, at a time the barrier
+        accepts, so one request posts several count_adjusts."""
+        item = data.draw(st.sampled_from(self.stocked_items()))
+        before = self.snapshots(item.id)
+        stocked = sorted(
+            (s for s in before.values() if not s.batch.is_default and s.batch.on_hand > 0),
+            key=lambda s: s.batch.id,
+        )
+        left_out = data.draw(st.sampled_from(stocked))
+        named = [s for s in stocked if s is not left_out]
+        # Found as expected, or more or less, zero included.
+        counts = {
+            s.batch.id: data.draw(st.one_of(st.just(s.batch.on_hand), thousandths(0, 3_000_000)))
+            for s in named
+        }
+        # The later of a random time today and the item's latest movement, and
+        # after its latest count, so the barrier accepts it.
+        today = self.at(data.draw(HOURS), data.draw(MINUTES))
+        counted_at = max(today, self.last_movement_at(item.id))
+        if self.barred(item.id, counted_at):
+            counted_at = self.last_count[item.id] + timedelta(minutes=1)
+        self.post_count(item, before, counted_at, named, counts)
+
+    def last_movement_at(self, item_id: UUID) -> datetime | None:
+        """The latest occurred_at on any of the item's batches here, empty ones included."""
+        return self.db.scalar(
+            select(func.max(StockBalance.last_movement_at)).where(
+                StockBalance.business_id == self.business_id,
+                StockBalance.location_id == self.cat.location.id,
+                StockBalance.item_id == item_id,
+            )
+        )
+
+    def post_count(
+        self,
+        item: Item,
+        before: dict[UUID, Snapshot],
+        counted_at: datetime,
+        named: list[Snapshot],
+        counts: dict[UUID, Decimal],
+        counted_qty: Decimal | None = None,
+    ) -> None:
+        """Post one count of the item and check rule 9, or expect the refusal.
+
+        A batch-tracked item counts the batches in counts (named, as
+        snapshots); an untracked one gives counted_qty.
+        """
+        if item.tracks_batches:
             counted_item = CountItemInput(
                 item.id, batches=[BatchCountInput(b, qty) for b, qty in counts.items()]
             )
         else:
-            named, counts = [], {}
-            counted_qty = data.draw(thousandths(0, 3_000_000))
             counted_item = CountItemInput(item.id, counted_qty=counted_qty)
-
         client_id = uuid.uuid4()
         call = partial(
             count_stock,
@@ -428,13 +504,7 @@ class StockLedgerMachine(RuleBasedStateMachine):
             client_id=client_id,
             source="simulator",
         )
-        last_movement_at = self.db.scalar(
-            select(func.max(StockBalance.last_movement_at)).where(
-                StockBalance.business_id == self.business_id,
-                StockBalance.location_id == self.cat.location.id,
-                StockBalance.item_id == item.id,
-            )
-        )
+        last_movement_at = self.last_movement_at(item.id)
         # A named batch received later, a count not after the last one, or one
         # before the item's latest movement on any batch (D51).
         if (
