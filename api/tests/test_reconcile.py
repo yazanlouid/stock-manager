@@ -15,9 +15,9 @@ from decimal import Decimal
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import sweep_alerts
 from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.reconcile import reconcile
+from app.domain.rules import sweep
 from app.domain.stock import ReceiptLineInput, receive, reverse, use, waste
 from app.models import StockBalance
 from tests.builders import (
@@ -71,7 +71,7 @@ def test_a_ledger_built_by_the_domain_functions_reconciles(db_session: Session, 
     # With a par level and a sweep before and after, so every kind of alert is
     # raised or resolved along the way and must still match the stock.
     add(db_session, new_par_level(cat.location, cat.item))
-    sweep_alerts(db_session, business_id, at(2, 5))
+    sweep(db_session, business_id, at(2, 5))
     receive_milk(db_session, cat, "2", date(2026, 11, 9), at(2, 6))
     receive_milk(db_session, cat, "3", date(2026, 11, 12), at(2, 7))
     # Splits across both batches, then falls short onto the default batch.
@@ -129,7 +129,7 @@ def test_a_ledger_built_by_the_domain_functions_reconciles(db_session: Session, 
     assert reconcile(db_session, business_id) == []
 
     # Ten days on, the milk that is left has expired.
-    sweep_alerts(db_session, business_id, at(20, 5))
+    sweep(db_session, business_id, at(20, 5))
     assert reconcile(db_session, business_id) == []
 
 

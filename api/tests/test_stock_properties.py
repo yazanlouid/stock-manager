@@ -44,10 +44,11 @@ from hypothesis.stateful import (
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import check_alerts, evaluate_alerts, sweep_alerts
+from app.domain.alerts import check_alerts
 from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
+from app.domain.rules import evaluate_rules, sweep
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
 from app.models import (
     Alert,
@@ -132,7 +133,7 @@ class StockLedgerMachine(RuleBasedStateMachine):
             if item.id in self.reorder_points:
                 reorder_point = self.reorder_points[item.id]
                 add(self.db, new_par_level(self.cat.location, item, reorder_point=reorder_point))
-        evaluate_alerts(
+        evaluate_rules(
             self.db,
             business_id,
             [(self.cat.location.id, item_id) for item_id in self.reorder_points],
@@ -592,7 +593,7 @@ class StockLedgerMachine(RuleBasedStateMachine):
         assert all(after[b].unit_cost == s.unit_cost for b, s in before.items())
 
     @rule(hour=HOURS)
-    def sweep(self, hour: int) -> None:
+    def sweep_rules(self, hour: int) -> None:
         """Sweep the alerts as of some hour of the current day.
 
         Late hours fall on the next day in Amman, so a later sweep earlier in
@@ -602,9 +603,9 @@ class StockLedgerMachine(RuleBasedStateMachine):
         local_date = (as_of + AMMAN_OFFSET).date()
         if self.swept_on is not None and local_date < self.swept_on:
             with pytest.raises(DomainError, match="already swept"):
-                sweep_alerts(self.db, self.business_id, as_of)
+                sweep(self.db, self.business_id, as_of)
             return
-        sweep_alerts(self.db, self.business_id, as_of)
+        sweep(self.db, self.business_id, as_of)
         self.swept_on = local_date
 
     @precondition(lambda self: self.requests)

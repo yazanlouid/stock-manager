@@ -10,9 +10,10 @@ the API request, the simulator or the test owns the transaction. Each one
   the movements already written and returns them without writing anything;
 - updates each touched batch's stock_balances row in the same transaction, so
   qty_on_hand is always the sum of the batch's movements (domain rule 1);
-- ends by re-evaluating the alerts of the items it wrote to (evaluate_alerts
-  in alerts.py), still holding their default-batch locks, so the open alerts
-  always match the stock (D59). A replay writes nothing and evaluates nothing.
+- ends by re-evaluating the alerts and draft order lines of the items it
+  wrote to (evaluate_rules in rules.py), still holding their default-batch
+  locks, so both always match the stock (D59, D67). A replay writes nothing
+  and evaluates nothing.
 """
 
 from collections.abc import Iterable, Sequence
@@ -24,10 +25,11 @@ from uuid import UUID
 from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import evaluate_alerts, lock_alerts_date
+from app.domain.alerts import lock_alerts_date
 from app.domain.checks import check_money, check_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
+from app.domain.rules import evaluate_rules
 from app.models import (
     Batch,
     Item,
@@ -644,7 +646,7 @@ def receive(
             ledger.post(batch, -settle_qty, "settle", plan.unit_cost, received_at)
             ledger.post(default, settle_qty, "settle", plan.unit_cost, received_at)
 
-    evaluate_alerts(session, business_id, defaults, received_at)
+    evaluate_rules(session, business_id, defaults, received_at)
     return ReceiveResult(receipt, tuple(ledger.movements), replayed=False)
 
 
@@ -724,7 +726,7 @@ def use(
     for allocation in result.allocations:
         batch = by_id[allocation.batch_id]
         ledger.post(batch, -allocation.quantity, "usage", batch.unit_cost, occurred_at)
-    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
+    evaluate_rules(session, business_id, [(location_id, item_id)], occurred_at)
     return UseResult(tuple(ledger.movements), result.shortfall, replayed=False)
 
 
@@ -802,7 +804,7 @@ def waste(
 
     ledger = _Ledger(session, business_id, client_id, source, user_id)
     ledger.post(batch, -quantity, "waste", batch.unit_cost, occurred_at, reason=reason)
-    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
+    evaluate_rules(session, business_id, [(location_id, item_id)], occurred_at)
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 
@@ -893,7 +895,7 @@ def reverse(
         )
     # The reversal's business time is its originals' occurred_at (one request,
     # so one time; max() only avoids relying on that).
-    evaluate_alerts(session, business_id, defaults, max(m.occurred_at for m in originals))
+    evaluate_rules(session, business_id, defaults, max(m.occurred_at for m in originals))
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 
