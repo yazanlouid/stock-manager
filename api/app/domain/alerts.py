@@ -26,11 +26,18 @@ so nothing counts as expiring or expired yet.
 
 Locking. The caller of evaluate_alerts holds the default-batch lock of each
 item it passes (D36), so two evaluations of one item take turns. The business
-row is the lock on the alerts date: the sweep updates it, and evaluate_alerts
-locks it FOR SHARE in a statement of its own before it evaluates. So a sweep
-waits for the writes that are evaluating, a write waits for a running sweep,
-and whichever goes second starts its evaluation after the first has committed
-and sees what it did (the same reasoning as Locking in stock.py).
+row is the lock on the alerts date: the sweep updates it, and every stock
+write locks it FOR SHARE (lock_alerts_date) before it locks any batch. So a
+sweep waits for the writes in progress, a write waits for a running sweep, and
+whichever goes second runs its statements after the first has committed and
+sees what it did (the same reasoning as Locking in stock.py).
+
+The order matters: business row first, then batches. A sweep that raises an
+alert for a batch needs that batch's row too, because the alert's foreign key
+locks the row it points at. If a write took its batch locks first and the
+business row last, a sweep holding the business row could be waiting for the
+write's batch while the write waits for the business row: a deadlock. Taking
+the business row first means a sweep never runs while a write holds batches.
 """
 
 from collections.abc import Iterable
@@ -43,8 +50,6 @@ from sqlalchemy.orm import Session
 
 from app.domain.checks import check_timestamp
 from app.domain.errors import DomainError
-
-ALERT_TYPES = frozenset({"low_stock", "expiring", "expired", "negative_stock"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,31 +265,33 @@ def _all_pairs(session: Session, business_id: UUID) -> list[Pair]:
 # --- Evaluate -------------------------------------------------------------------
 
 
+def lock_alerts_date(session: Session, business_id: UUID) -> None:
+    """Keep the business's alerts date still until this transaction ends.
+
+    A stock write calls this before it locks any batch (see Locking above):
+    it waits for a sweep that is running, and a sweep that starts later waits
+    for this transaction. A statement of its own, so everything the write
+    does next starts after any sweep it waited for has committed.
+    """
+    session.execute(
+        text("SELECT id FROM businesses WHERE id = :business_id FOR SHARE"),
+        {"business_id": business_id},
+    )
+
+
 def evaluate_alerts(
     session: Session, business_id: UUID, pairs: Iterable[Pair], at: datetime
 ) -> list[AlertChange]:
     """Bring the alerts of these (location_id, item_id) pairs into line with their stock.
 
-    Call it after writing the movements, holding each pair's default-batch
-    lock. at is business time, the write's occurred_at: it becomes raised_at
-    of an alert this raises and resolved_at of one it resolves.
+    Call it after writing the movements, holding the alerts-date lock and each
+    pair's default-batch lock; _lock_defaults in stock.py takes both. at is
+    business time, the write's occurred_at: it becomes raised_at of an alert
+    this raises and resolved_at of one it resolves.
     """
     pairs = sorted(set(pairs))
     if not pairs:
         return []
-    # Wait for a sweep that is running, and keep the alerts date still until
-    # this transaction ends (see Locking above). A statement of its own, so
-    # the evaluation below starts after any sweep it waited for has committed.
-    session.execute(
-        text("SELECT id FROM businesses WHERE id = :business_id FOR SHARE"),
-        {"business_id": business_id},
-    )
-    return _evaluate(session, business_id, pairs, at)
-
-
-def _evaluate(
-    session: Session, business_id: UUID, pairs: list[Pair], at: datetime
-) -> list[AlertChange]:
     rows = session.execute(_EVALUATE, _pair_params(business_id, pairs) | {"at": at})
     return [
         AlertChange(change, AlertKey(type, location_id, item_id, batch_id))
@@ -306,10 +313,21 @@ def sweep_alerts(session: Session, business_id: UUID, as_of: datetime) -> list[A
     something was out of line.
     """
     check_timestamp(as_of, "as_of")
-    # as_of's date in the business's timezone, computed by Postgres (D32).
-    # The UPDATE locks the business row, so it waits for writes that are
-    # evaluating (they hold it FOR SHARE), and they wait for this sweep.
-    swept_on = session.scalar(
+    if _move_alerts_date(session, business_id, as_of) is None:
+        raise DomainError(_sweep_refusal(session, business_id))
+    return evaluate_alerts(session, business_id, _all_pairs(session, business_id), as_of)
+
+
+def _move_alerts_date(session: Session, business_id: UUID, as_of: datetime) -> date | None:
+    """Set the alerts date to as_of's local date; None if that would move it back.
+
+    The date is as_of's date in the business's timezone, computed by Postgres
+    (D32). The UPDATE locks the business row until the transaction ends, so it
+    waits for the stock writes in progress (they hold the row FOR SHARE), and
+    writes that start later wait for this sweep. None also means there is no
+    such business.
+    """
+    return session.scalar(
         text(
             """
             UPDATE businesses
@@ -322,12 +340,6 @@ def sweep_alerts(session: Session, business_id: UUID, as_of: datetime) -> list[A
         ),
         {"business_id": business_id, "as_of": as_of},
     )
-    if swept_on is None:
-        raise DomainError(_sweep_refusal(session, business_id))
-    pairs = _all_pairs(session, business_id)
-    if not pairs:
-        return []
-    return _evaluate(session, business_id, pairs, as_of)
 
 
 def _sweep_refusal(session: Session, business_id: UUID) -> str:
@@ -341,13 +353,16 @@ def _sweep_refusal(session: Session, business_id: UUID) -> str:
     return f"alerts were already swept as of {row.alerts_swept_on}, and the date can't move back"
 
 
-def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> date | None:
-    """Sweep if now's local date is past the alerts date; return the alerts date (D62).
+def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> None:
+    """Sweep as of now if its local date is past the alerts date (D62).
 
     GET /alerts calls this, so the list is current whenever someone reads it.
     The check is a plain read: on most reads the date hasn't moved and nothing
-    is locked. Two reads that both find a sweep due both sweep, one after the
-    other, and the second changes nothing.
+    is locked. Two reads that both find a sweep due take turns at the UPDATE.
+    On the same date the second re-evaluates and changes nothing. If the
+    first moved the date past the second's (two reads either side of
+    midnight), the second's date would move it back, so it does nothing: the
+    alerts are already newer than it asked for.
     """
     row = session.execute(
         text(
@@ -362,9 +377,9 @@ def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> d
     if row is None:
         raise DomainError(f"business {business_id} not found")
     if row.alerts_swept_on is not None and row.alerts_swept_on >= row.today:
-        return row.alerts_swept_on
-    sweep_alerts(session, business_id, now)
-    return row.today
+        return
+    if _move_alerts_date(session, business_id, now) is not None:
+        evaluate_alerts(session, business_id, _all_pairs(session, business_id), now)
 
 
 # --- Check ----------------------------------------------------------------------
@@ -378,7 +393,7 @@ def check_alerts(session: Session, business_id: UUID) -> list[AlertDifference]:
     """
     pairs = _all_pairs(session, business_id)
     if not pairs:
-        return []
+        return []  # unnest of nothing would find nothing; skip the query
     rows = session.execute(_CHECK, _pair_params(business_id, pairs))
     return [
         AlertDifference(kind, AlertKey(type, location_id, item_id, batch_id))

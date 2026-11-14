@@ -5,15 +5,16 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 2, step 6 (PR), then 7 (review) and 8 (CI and merge)
-- Branch and PR: feat/alerts, PR to be opened
-- Done so far: step 0 (30a3a2c on run/week-2); task 2 built and checked on feat/alerts (all seven plan steps, D59–D66)
-- Next: open task 2's PR into run/week-2, review it with fresh eyes, fix findings, merge when CI is green, then start task 3 on `feat/draft-orders`
+- Task and step: task 2, step 8 (CI and merge)
+- Branch and PR: feat/alerts, PR #10
+- Done so far: step 0 (30a3a2c on run/week-2); task 2 built, checked, reviewed and the review's findings fixed (D59–D66)
+- Next: watch PR #10's CI, squash-merge it into run/week-2 when green, then start task 3 on `feat/draft-orders`
 - Next decision ID: D67
-- Updated: 2026-11-14 18:31
+- Updated: 2026-11-14 18:40
 
 ## For Yazan (look at these first)
 
+- **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
 - **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 and 4 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
 - **D62: GET /alerts writes.** It runs the sweep when the local date has moved on, so a GET can raise and resolve alerts. The alternatives were a CLI command (nothing runs it outside the simulator) or the API's start-up (stale from the next day).
 - **D63: the expiry window's formula** (min of expiry_warn_days and half the shelf life) is my number; see Assumptions.
@@ -37,7 +38,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 2: par levels and alerts
 
-- Branch, PR, merge commit: feat/alerts
+- Branch, PR, merge commit: feat/alerts, PR #10
 - Plan: one commit per step, each with its tests.
   1. Tables: `par_levels`, `alerts` and `businesses.alerts_swept_on` (models in `app/models/rules.py`, one migration, builders, schema tests in `tests/test_rules_schema.py`).
   2. `app/domain/alerts.py`: `evaluate_alerts(session, business_id, pairs, at)` (lock the business row FOR SHARE, then one statement: what is due for the touched items, resolve what isn't, raise what's missing) and `sweep_alerts(session, business_id, as_of)`. Worked examples in `tests/test_alerts.py`, calling evaluate directly on rows from the builders.
@@ -55,7 +56,15 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - `reset --end-date 2026-10-31`: 38.0 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline. It left 17 negative_stock alerts, all resolved, and no alerts date, because the simulator doesn't sweep or set par levels until task 4.
   - reconcile: Dar Zaatar Café OK (now including the alerts check).
   - `git diff --check run/week-2...HEAD`: nothing.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #10, seven findings.
+  1. Fixed: a stock write and the sweep could deadlock. The write held its batch locks and then asked for the business row; the sweep held the business row and then needed a batch row, because an alert's foreign key locks the batch it points at. Reproduced with two connections on the dev database (DeadlockDetected). Writes now lock the business row first, inside `_lock_defaults`, before any batch; with that order the same two-connection script shows the sweep waiting and then finishing.
+  2. Fixed: two reads of GET /alerts either side of local midnight could turn the earlier one into a 400, because its sweep would move the date back. `sweep_alerts_if_due` now does nothing in that case; `sweep_alerts` still refuses when called directly.
+  3. Fixed: no test covered the lock order. `test_every_write_locks_the_alerts_date_before_any_batch` records each write's statements and checks the order.
+  4. Fixed: `docs/schema.md` said the simulator sweeps each simulated day; it doesn't until task 4. The sentence is back in task 4's hands.
+  5. Fixed: `ALERT_TYPES` was unused; removed.
+  6. Fixed: a pointless last assertion in the API waste test, with two imports only it used; removed.
+  7. Declined: the business-row lock statement runs once per write even when the transaction already holds the lock (the simulator's day-long transactions), about 1.8 s of a 37.6 s profile. Skipping it would need per-transaction state in the domain functions, which costs more clarity than the 5% is worth.
+  - After the fixes: 457 passed in 143.5 s, ruff clean, reset identical to the baseline, reconcile OK.
 - Notes:
   - Gate 1's time: the first measurement after wiring the evaluation into the writes read 80.6 s. A rerun read 48.4 s, and a profile of the same 30 days put the evaluation at 4.3 s of 37.6 s (lock 1.8 s, statement 2.5 s). The 80.6 s was the machine, not the code.
   - A mutation check on the property machine (expiring's `<=` changed to `<` in the domain query) survived one run and was caught by the next: the machine reaches the window's exact boundary in most runs, not all. The parametrized worked examples in `tests/test_alerts.py` pin the boundary. In one counted run of 1,213 steps, low_stock was due 1,399 times, expired 188, negative_stock 145 and expiring 120.
@@ -113,3 +122,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-14 17:36: task 2 started on feat/alerts; plan and D59–D65 committed (0ce9104).
 - 2026-11-14 17:37: stopped by a usage limit during task 2's plan step 1; work in progress committed and pushed (cb1f6bf), resume point written. (These three entries first carried estimated times that ran ahead of the clock; corrected here from the commits' times. From here on every time is read from the clock.)
 - 2026-11-14 18:04: resumed in the same session (model unchanged: Claude Fable 5.2). The working tree was clean and feat/alerts matched origin.
+- 2026-11-14 18:33: PR #10 opened for task 2.
+- 2026-11-14 18:40: PR #10 reviewed (seven findings, six fixed, one declined) and the fixes pushed.

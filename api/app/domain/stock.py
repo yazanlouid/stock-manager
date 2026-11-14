@@ -24,7 +24,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import evaluate_alerts
+from app.domain.alerts import evaluate_alerts, lock_alerts_date
 from app.domain.checks import check_money, check_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
@@ -157,6 +157,8 @@ def _ensure_default_batch(
 # with one statement (_lock_defaults), and only then loads and locks the item's
 # other batches with a second statement (_lock_batches). The default batch is
 # the item's lock at that location, so requests for the same item take turns.
+# Before the default batches, _lock_defaults takes the business's alerts-date
+# lock, which keeps an alerts sweep and a write apart (alerts.py).
 #
 # Why two statements: under READ COMMITTED, each statement reads from a
 # snapshot taken when the statement starts. When SELECT ... FOR UPDATE has to
@@ -202,7 +204,13 @@ def _lock_batches(session: Session, business_id: UUID, *where) -> list[_BatchSta
 def _lock_defaults(
     session: Session, business_id: UUID, pairs: Iterable[tuple[UUID, UUID]]
 ) -> dict[tuple[UUID, UUID], _BatchState]:
-    """Create if missing, then lock, the default batch of each (location_id, item_id)."""
+    """Create if missing, then lock, the default batch of each (location_id, item_id).
+
+    The alerts-date lock comes first: a write must hold it before any batch
+    lock, or it could deadlock with an alerts sweep (Locking in alerts.py).
+    Every write locks its batches through here, so none can get the order wrong.
+    """
+    lock_alerts_date(session, business_id)
     pairs = sorted(set(pairs))
     for location_id, item_id in pairs:
         _ensure_default_batch(session, business_id, location_id, item_id)

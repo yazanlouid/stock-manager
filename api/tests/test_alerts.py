@@ -9,14 +9,17 @@ business is in Asia/Amman (UTC+3).
 """
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
 
+from app.domain import alerts as alerts_module
 from app.domain.alerts import (
     AlertChange,
     AlertDifference,
@@ -503,22 +506,50 @@ def test_sweep_if_due_sweeps_once_a_day(db_session: Session, cat: Catalogue):
     business_id = cat.business.id
 
     # Never swept: due.
-    assert sweep_alerts_if_due(db_session, business_id, nov(10)) == day(10)
+    sweep_alerts_if_due(db_session, business_id, nov(10))
+    assert swept_on(db_session, cat) == day(10)
     assert open_alerts(db_session, cat) == {("expiring", batch.id)}
 
     # Later the same day: not due, so nothing is evaluated. The stale alert
     # planted here would be resolved by a sweep.
     planted = add(db_session, new_alert(cat.location, cat.item, raised_at=nov(10)))
-    assert sweep_alerts_if_due(db_session, business_id, nov(10, 15)) == day(10)
+    sweep_alerts_if_due(db_session, business_id, nov(10, 15))
     assert planted.id in {alert.id for alert in alerts(db_session, cat)}
 
     # The next day: due again.
-    assert sweep_alerts_if_due(db_session, business_id, nov(11)) == day(11)
+    sweep_alerts_if_due(db_session, business_id, nov(11))
+    assert swept_on(db_session, cat) == day(11)
     assert open_alerts(db_session, cat) == {("expired", batch.id)}
 
     # A clock behind the alerts date leaves it alone.
-    assert sweep_alerts_if_due(db_session, business_id, nov(9)) == day(11)
+    sweep_alerts_if_due(db_session, business_id, nov(9))
     assert swept_on(db_session, cat) == day(11)
+
+
+def test_sweep_if_due_does_nothing_when_another_sweep_got_ahead_of_it(
+    db_session: Session, cat: Catalogue, monkeypatch: pytest.MonkeyPatch
+):
+    """Two reads either side of midnight: the later date wins the UPDATE, and
+    the earlier read's date would move the alerts date back. It must not fail
+    and must not evaluate. The lost race is staged here: the read sees no
+    sweep yet, and by the time it tries to move the date, a sweep as of the
+    next day has run."""
+    planted = add(db_session, new_alert(cat.location, cat.item, raised_at=nov(10)))
+    real_move = alerts_module._move_alerts_date
+
+    def move_after_the_other_sweep(session, business_id, as_of):
+        monkeypatch.undo()  # the other sweep runs the real function
+        sweep(db_session, cat, nov(11))
+        return real_move(session, business_id, as_of)
+
+    monkeypatch.setattr(alerts_module, "_move_alerts_date", move_after_the_other_sweep)
+    sweep_alerts_if_due(db_session, cat.business.id, nov(10))
+
+    assert swept_on(db_session, cat) == day(11)
+    # The other sweep resolved the planted alert as of the 11th; ours added nothing.
+    (resolved,) = alerts(db_session, cat, "resolved")
+    assert (resolved.id, resolved.resolved_at) == (planted.id, nov(11))
+    assert alerts(db_session, cat) == []
 
 
 # --- The check ------------------------------------------------------------------
@@ -690,6 +721,65 @@ def test_a_write_judges_expiry_by_the_alerts_date_not_by_its_own_date(
     sweep(db_session, cat, nov(14))
     assert open_alerts(db_session, cat) == {("expired", batch_id)}
     assert_in_line(db_session, cat)
+
+
+@contextmanager
+def recorded_statements(db: Session) -> Iterator[list[str]]:
+    """The SQL statements the session's connection runs inside the block."""
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(" ".join(statement.split()))
+
+    connection = db.connection()
+    event.listen(connection, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(connection, "before_cursor_execute", record)
+
+
+def test_every_write_locks_the_alerts_date_before_any_batch(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+):
+    """The lock order that keeps a write and a sweep from deadlocking (D61):
+    the business row FOR SHARE first, then batches. A sweep holds the business
+    row and then needs batch rows for the alerts it raises, so a write that
+    locked a batch first and the business row second could wait on the sweep
+    while the sweep waits on it."""
+    item, sack = flour
+    used = uuid.uuid4()
+    writes = {
+        "receive": lambda: do_receive(db_session, cat, milk(cat, "2"), received_at=nov(9)),
+        "use": lambda: do_use(db_session, cat, cat.item, "100", nov(10), client_id=used),
+        "waste": lambda: do_waste(
+            db_session, cat, cat.item, batch_id_of(db_session, cat), "100", occurred_at=nov(10, 10)
+        ),
+        "reverse": lambda: do_reverse(db_session, cat, used),
+        "count": lambda: do_count(db_session, cat, untracked(item, "5"), counted_at=nov(11)),
+    }
+    for name, write in writes.items():
+        with recorded_statements(db_session) as statements:
+            write()
+        alerts_date_lock = next(
+            i for i, s in enumerate(statements) if "FROM businesses" in s and "FOR SHARE" in s
+        )
+        first_batch_lock = next(
+            i for i, s in enumerate(statements) if "batches" in s and "FOR UPDATE" in s
+        )
+        assert alerts_date_lock < first_batch_lock, name
+        # And nothing inserts a default batch before the lock either.
+        assert not any("INSERT INTO batches" in s for s in statements[:alerts_date_lock]), name
+
+    # The sweep takes the business row with its first statement.
+    with recorded_statements(db_session) as statements:
+        sweep(db_session, cat, nov(12))
+    assert statements[0].startswith("UPDATE businesses")
+
+
+def batch_id_of(db: Session, cat: Catalogue) -> UUID:
+    """The one received batch of cat's milk."""
+    return db.scalars(select(Batch.id).where(Batch.item_id == cat.item.id, ~Batch.is_default)).one()
 
 
 def test_a_replay_evaluates_nothing(db_session: Session, cat: Catalogue):

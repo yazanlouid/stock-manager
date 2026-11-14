@@ -15,11 +15,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.reconcile import reconcile
-from app.models import Batch, Business, Item, ItemUnit
+from app.models import Business, Item, ItemUnit
 from tests.builders import (
     Catalogue,
     add,
@@ -261,7 +260,7 @@ def test_alerts_need_a_known_business(client: TestClient):
 
 
 def test_wasting_an_expired_batch_moves_its_alert_to_the_history(
-    client: TestClient, db_session: Session, cat: Catalogue
+    client: TestClient, cat: Catalogue
 ):
     batch_id = receive_milk(client, cat, "2", expires_day=8, at=nov(5))
     assert kinds(get_alerts(client, cat)) == [("expired", "open")]
@@ -278,4 +277,3 @@ def test_wasting_an_expired_batch_moves_its_alert_to_the_history(
         "2026-11-10T12:00:00Z",
     )
     assert resolved["batch"]["on_hand"] == "0.000"
-    assert db_session.scalar(select(Batch.id).where(Batch.id == uuid.UUID(batch_id)))
