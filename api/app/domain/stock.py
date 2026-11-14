@@ -9,7 +9,10 @@ the API request, the simulator or the test owns the transaction. Each one
   0, 1, 2... in the order written, and is idempotent on client_id: a retry finds
   the movements already written and returns them without writing anything;
 - updates each touched batch's stock_balances row in the same transaction, so
-  qty_on_hand is always the sum of the batch's movements (domain rule 1).
+  qty_on_hand is always the sum of the batch's movements (domain rule 1);
+- ends by re-evaluating the alerts of the items it wrote to (evaluate_alerts
+  in alerts.py), still holding their default-batch locks, so the open alerts
+  always match the stock (D59). A replay writes nothing and evaluates nothing.
 """
 
 from collections.abc import Iterable, Sequence
@@ -21,7 +24,8 @@ from uuid import UUID
 from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.orm import Session
 
-from app.domain.checks import check_money, check_quantity
+from app.domain.alerts import evaluate_alerts, lock_alerts_date
+from app.domain.checks import check_money, check_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.models import (
@@ -153,6 +157,8 @@ def _ensure_default_batch(
 # with one statement (_lock_defaults), and only then loads and locks the item's
 # other batches with a second statement (_lock_batches). The default batch is
 # the item's lock at that location, so requests for the same item take turns.
+# Before the default batches, _lock_defaults takes the business's alerts-date
+# lock, which keeps an alerts sweep and a write apart (alerts.py).
 #
 # Why two statements: under READ COMMITTED, each statement reads from a
 # snapshot taken when the statement starts. When SELECT ... FOR UPDATE has to
@@ -198,7 +204,13 @@ def _lock_batches(session: Session, business_id: UUID, *where) -> list[_BatchSta
 def _lock_defaults(
     session: Session, business_id: UUID, pairs: Iterable[tuple[UUID, UUID]]
 ) -> dict[tuple[UUID, UUID], _BatchState]:
-    """Create if missing, then lock, the default batch of each (location_id, item_id)."""
+    """Create if missing, then lock, the default batch of each (location_id, item_id).
+
+    The alerts-date lock comes first: a write must hold it before any batch
+    lock, or it could deadlock with an alerts sweep (Locking in alerts.py).
+    Every write locks its batches through here, so none can get the order wrong.
+    """
+    lock_alerts_date(session, business_id)
     pairs = sorted(set(pairs))
     for location_id, item_id in pairs:
         _ensure_default_batch(session, business_id, location_id, item_id)
@@ -340,13 +352,6 @@ class _Ledger:
 def _check_source(source: str) -> None:
     if source not in SOURCES:
         raise DomainError(f"source must be one of {', '.join(sorted(SOURCES))}, got {source!r}")
-
-
-def _check_timestamp(value: datetime, name: str) -> None:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be a datetime, not {type(value).__name__}")
-    if value.utcoffset() is None:
-        raise DomainError(f"{name} must include a timezone")
 
 
 def iso_utc(value: datetime) -> str:
@@ -553,7 +558,7 @@ def receive(
     after its receive (domain rule 4): a settle pair moves min(qty, shortfall)
     out of the new batch and into the default batch, at the new batch's cost.
     """
-    _check_timestamp(received_at, "received_at")
+    check_timestamp(received_at, "received_at")
     _check_source(source)
     if not lines:
         raise DomainError("a receipt needs at least one line")
@@ -639,6 +644,7 @@ def receive(
             ledger.post(batch, -settle_qty, "settle", plan.unit_cost, received_at)
             ledger.post(default, settle_qty, "settle", plan.unit_cost, received_at)
 
+    evaluate_alerts(session, business_id, defaults, received_at)
     return ReceiveResult(receipt, tuple(ledger.movements), replayed=False)
 
 
@@ -684,7 +690,7 @@ def use(
     default batch that has never received anything.
     """
     check_quantity(quantity)
-    _check_timestamp(occurred_at, "occurred_at")
+    check_timestamp(occurred_at, "occurred_at")
     _check_source(source)
 
     replayed = _replay(session, business_id, client_id, {"usage"})
@@ -718,6 +724,7 @@ def use(
     for allocation in result.allocations:
         batch = by_id[allocation.batch_id]
         ledger.post(batch, -allocation.quantity, "usage", batch.unit_cost, occurred_at)
+    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
     return UseResult(tuple(ledger.movements), result.shortfall, replayed=False)
 
 
@@ -748,7 +755,7 @@ def waste(
     received_at is when it was created, so that rule never applies to it.
     """
     check_quantity(quantity)
-    _check_timestamp(occurred_at, "occurred_at")
+    check_timestamp(occurred_at, "occurred_at")
     _check_source(source)
     if reason not in WASTE_REASONS:
         raise DomainError(
@@ -795,6 +802,7 @@ def waste(
 
     ledger = _Ledger(session, business_id, client_id, source, user_id)
     ledger.post(batch, -quantity, "waste", batch.unit_cost, occurred_at, reason=reason)
+    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 
@@ -883,6 +891,9 @@ def reverse(
             original.occurred_at,
             reverses_id=original.id,
         )
+    # The reversal's business time is its originals' occurred_at (one request,
+    # so one time; max() only avoids relying on that).
+    evaluate_alerts(session, business_id, defaults, max(m.occurred_at for m in originals))
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 

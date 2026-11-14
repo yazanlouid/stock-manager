@@ -19,11 +19,13 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import (
+    Alert,
     Batch,
     Business,
     Item,
     ItemUnit,
     Location,
+    ParLevel,
     Receipt,
     ReceiptLine,
     StockBalance,
@@ -238,6 +240,36 @@ def new_count_adjust(batch: Batch, line: StockCountLine, **overrides: Any) -> St
         "occurred_at": COUNTED_AT,
     }
     return new_movement(batch, **(values | overrides))
+
+
+# --- Rules --------------------------------------------------------------------
+
+
+def new_par_level(location: Location, item: Item, **overrides: Any) -> ParLevel:
+    """Reorder at 2000 base units and order up to 6000."""
+    values = {
+        "business_id": location.business_id,
+        "location_id": location.id,
+        "item_id": item.id,
+        "reorder_point": Decimal("2000"),
+        "order_up_to": Decimal("6000"),
+    }
+    return ParLevel(**(values | overrides))
+
+
+def new_alert(location: Location, item: Item, **overrides: Any) -> Alert:
+    """An open low_stock alert for the item at the location, raised at OCCURRED_AT.
+
+    For the other types, pass type and batch_id.
+    """
+    values = {
+        "business_id": location.business_id,
+        "location_id": location.id,
+        "item_id": item.id,
+        "type": "low_stock",
+        "raised_at": OCCURRED_AT,
+    }
+    return Alert(**(values | overrides))
 
 
 # --- Whole datasets -----------------------------------------------------------

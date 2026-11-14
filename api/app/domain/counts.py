@@ -3,8 +3,9 @@
 count_stock() follows the same contract as the functions in stock.py: it works
 on the caller's Session and never commits, scopes every lookup by business_id,
 raises DomainError for a request it refuses, numbers its movements by
-client_seq, replays on client_id, and keeps stock_balances in step. It uses
-stock.py's locking, ledger and lookup helpers.
+client_seq, replays on client_id, keeps stock_balances in step, and ends by
+re-evaluating the counted items' alerts (D59). It uses stock.py's locking,
+ledger and lookup helpers.
 
 A count covers every batch of each counted item at the location (D54). Each
 batch it covers gets a line with expected_qty (the batch's balance when the
@@ -22,12 +23,12 @@ from uuid import UUID
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from app.domain.checks import ZERO, check_counted_quantity
+from app.domain.alerts import evaluate_alerts
+from app.domain.checks import ZERO, check_counted_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.stock import (
     _BatchState,
     _check_source,
-    _check_timestamp,
     _check_user,
     _get,
     _latest_counts,
@@ -114,7 +115,7 @@ def count_stock(
     after every movement of the item there and after its latest count, and
     stock.py then refuses any write for the item there dated at or before it.
     """
-    _check_timestamp(counted_at, "counted_at")
+    check_timestamp(counted_at, "counted_at")
     _check_source(source)
     _check_input(items)
 
@@ -192,6 +193,7 @@ def count_stock(
                 counted_at,
                 stock_count_line_id=line.id,
             )
+    evaluate_alerts(session, business_id, defaults, counted_at)
     return CountResult(count, lines, tuple(ledger.movements), replayed=False)
 
 

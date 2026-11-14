@@ -1,6 +1,7 @@
 """Tenancy: businesses, their locations and their users."""
 
 import uuid
+from datetime import date
 
 from sqlalchemy import CheckConstraint, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,6 +27,9 @@ class Business(Base):
     timezone: Mapped[str]
     # How many days before expiry a batch counts as expiring.
     expiry_warn_days: Mapped[int] = mapped_column(server_default=text("3"))
+    # The local date the expiring, expired and low-stock alerts are judged
+    # against (D61). Only the alerts sweep moves it; NULL until the first sweep.
+    alerts_swept_on: Mapped[date | None]
     created_at: Mapped[CreatedAt]
 
 

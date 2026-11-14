@@ -15,6 +15,7 @@ from decimal import Decimal
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.domain.alerts import sweep_alerts
 from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.reconcile import reconcile
 from app.domain.stock import ReceiptLineInput, receive, reverse, use, waste
@@ -24,6 +25,7 @@ from tests.builders import (
     OCCURRED_AT,
     Catalogue,
     add,
+    new_alert,
     new_balance,
     new_batch,
     new_count_adjust,
@@ -31,6 +33,7 @@ from tests.builders import (
     new_default_batch,
     new_item,
     new_movement,
+    new_par_level,
     new_receipt,
     new_receipt_line,
     new_receive,
@@ -65,6 +68,10 @@ def kinds(db: Session, cat: Catalogue) -> list[str]:
 
 def test_a_ledger_built_by_the_domain_functions_reconciles(db_session: Session, cat: Catalogue):
     business_id, location_id = cat.business.id, cat.location.id
+    # With a par level and a sweep before and after, so every kind of alert is
+    # raised or resolved along the way and must still match the stock.
+    add(db_session, new_par_level(cat.location, cat.item))
+    sweep_alerts(db_session, business_id, at(2, 5))
     receive_milk(db_session, cat, "2", date(2026, 11, 9), at(2, 6))
     receive_milk(db_session, cat, "3", date(2026, 11, 12), at(2, 7))
     # Splits across both batches, then falls short onto the default batch.
@@ -119,7 +126,10 @@ def test_a_ledger_built_by_the_domain_functions_reconciles(db_session: Session, 
         ],
         client_id=uuid.uuid4(), source="count",
     )  # fmt: skip
+    assert reconcile(db_session, business_id) == []
 
+    # Ten days on, the milk that is left has expired.
+    sweep_alerts(db_session, business_id, at(20, 5))
     assert reconcile(db_session, business_id) == []
 
 
@@ -245,6 +255,38 @@ def test_a_count_adjust_for_a_line_counted_as_expected(db_session: Session, cat:
     add(db_session, new_balance(batch, qty_on_hand=Decimal("5"), last_movement_at=COUNTED_AT))
 
     assert kinds(db_session, cat) == ["count_line_mismatch"]
+
+
+def test_an_alert_that_is_due_but_not_open(db_session: Session, cat: Catalogue):
+    # A negative default batch with no movements: the balance matches the
+    # ledger's zero only if it is zero, so build the shortfall with a usage.
+    default = add(db_session, new_default_batch(cat.location, cat.item))
+    add(db_session, new_movement(default, qty_delta=Decimal("-100")))
+    add(db_session, new_balance(default, qty_on_hand=Decimal("-100"), last_movement_at=OCCURRED_AT))
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["alert_missing"]
+    assert f"negative_stock alert for {cat.item.sku} default batch" in problems[0].message
+    assert "is due but not open" in problems[0].message
+
+
+def test_an_open_alert_that_is_not_due(db_session: Session, cat: Catalogue):
+    # A low_stock alert for an item with no par level.
+    add(db_session, new_alert(cat.location, cat.item))
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["alert_not_due"]
+    assert f"low_stock alert for {cat.item.sku} at location {cat.location.id}" in (
+        problems[0].message
+    )
+
+
+def test_a_resolved_alert_is_history_and_never_a_problem(db_session: Session, cat: Catalogue):
+    add(db_session, new_alert(cat.location, cat.item, status="resolved", resolved_at=COUNTED_AT))
+
+    assert kinds(db_session, cat) == []
 
 
 def test_problems_are_scoped_to_the_business(db_session: Session, cat: Catalogue, other: Catalogue):

@@ -1,15 +1,21 @@
-"""Domain rules 1 to 7 and 9 over random sequences of stock requests (Hypothesis).
+"""Domain rules 1 to 7, 9 and 10 over random sequences of stock requests (Hypothesis).
 
 A RuleBasedStateMachine posts random receives, usages, wastes, reversals,
-counts and retries for three items: milk (batches and expiry), eggs (batches,
-no expiry) and flour (no batch tracking), with expiry dates a few days either
-side of the usage dates and times near midnight in Amman.
+counts, retries and alert sweeps for three items: milk (batches and expiry),
+eggs (batches, no expiry) and flour (no batch tracking), with expiry dates a
+few days either side of the usage dates and times near midnight in Amman.
+Milk and flour have par levels; eggs have none.
 
 Rules 2, 3, 7 and 9 are about the moment of a write, so the rules check them
-against a snapshot taken just before it. Rules 1, 4, 5 and 6 are about the
+against a snapshot taken just before it. Rules 1, 4, 5, 6 and 10 are about the
 state, so the invariants check them after every step. Every rule expects the
 DomainError when its time breaks the count barrier (D51), and usage and waste
 respect the received_at rule (D50).
+
+Rule 10 (alerts, D59): after every step the open alerts are exactly what the
+batches, balances and par levels say is due. The invariant works that out in
+Python from the snapshots, on its own, and compares it with the alerts table
+and with check_alerts.
 
 Each example opens its own connection and transaction and rolls it back in
 teardown, because function-scoped fixtures don't reset between examples
@@ -38,12 +44,21 @@ from hypothesis.stateful import (
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
+from app.domain.alerts import check_alerts, evaluate_alerts, sweep_alerts
 from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
-from app.models import Batch, Item, ReceiptLine, StockBalance, StockCount, StockMovement
-from tests.builders import add, build_catalogue, new_item, new_unit
+from app.models import (
+    Alert,
+    Batch,
+    Item,
+    ReceiptLine,
+    StockBalance,
+    StockCount,
+    StockMovement,
+)
+from tests.builders import add, build_catalogue, new_item, new_par_level, new_unit
 
 # Asia/Amman (the test business's timezone) has been UTC+3 all year since
 # October 2022. A fixed offset keeps Python's zoneinfo, which needs the tzdata
@@ -52,6 +67,10 @@ AMMAN_OFFSET = timedelta(hours=3)
 FIRST_DAY = date(2026, 11, 1)
 # Stands in for a default batch that doesn't exist yet when a snapshot is taken.
 NEW_DEFAULT = UUID(int=0)
+# The business's expiry_warn_days (the column's default), and the machine's
+# milk shelf life: half of it, 2 days, is milk's expiry window (D63).
+EXPIRY_WARN_DAYS = 3
+MILK_SHELF_LIFE_DAYS = 4
 
 ITEMS = st.integers(0, 2)  # milk, eggs, flour
 HOURS = st.integers(0, 23)
@@ -101,6 +120,26 @@ class StockLedgerMachine(RuleBasedStateMachine):
             (eggs, add(self.db, new_unit(eggs, name="tray", factor_to_base=Decimal("30")))),
             (flour, add(self.db, new_unit(flour, name="bag", factor_to_base=Decimal("1000")))),
         ]
+
+        # Alerts. Milk's window comes from its shelf life; eggs and flour have
+        # none. The reorder points sit inside the quantities the rules draw,
+        # so low stock comes and goes. The par levels are added as rows, so
+        # their items are evaluated once here to bring the alerts into line:
+        # with no stock yet, both start low.
+        self.cat.item.shelf_life_days = MILK_SHELF_LIFE_DAYS
+        self.reorder_points = {self.cat.item.id: Decimal("1000"), flour.id: Decimal("500")}
+        for item, _ in self.items:
+            if item.id in self.reorder_points:
+                reorder_point = self.reorder_points[item.id]
+                add(self.db, new_par_level(self.cat.location, item, reorder_point=reorder_point))
+        evaluate_alerts(
+            self.db,
+            business_id,
+            [(self.cat.location.id, item_id) for item_id in self.reorder_points],
+            datetime.combine(FIRST_DAY, time(0), UTC),
+        )
+        # The business's alerts date: None until the first sweep (D61).
+        self.swept_on: date | None = None
 
         self.day = FIRST_DAY
         self.requests: list[Request] = []
@@ -552,6 +591,22 @@ class StockLedgerMachine(RuleBasedStateMachine):
             assert m.qty_delta == line.counted_qty - line.expected_qty
         assert all(after[b].unit_cost == s.unit_cost for b, s in before.items())
 
+    @rule(hour=HOURS)
+    def sweep(self, hour: int) -> None:
+        """Sweep the alerts as of some hour of the current day.
+
+        Late hours fall on the next day in Amman, so a later sweep earlier in
+        the day would move the alerts date back, which is refused.
+        """
+        as_of = self.at(hour)
+        local_date = (as_of + AMMAN_OFFSET).date()
+        if self.swept_on is not None and local_date < self.swept_on:
+            with pytest.raises(DomainError, match="already swept"):
+                sweep_alerts(self.db, self.business_id, as_of)
+            return
+        sweep_alerts(self.db, self.business_id, as_of)
+        self.swept_on = local_date
+
     @precondition(lambda self: self.requests)
     @rule(data=st.data())
     def retry_request(self, data: st.DataObject) -> None:
@@ -646,6 +701,53 @@ class StockLedgerMachine(RuleBasedStateMachine):
                 value[batch_id] += qty_delta * (unit_cost or 0)
             assert all(q == 0 for q in qty.values())
             assert all(v == 0 for v in value.values())
+
+    def expiry_window(self, item: Item) -> int:
+        if item.shelf_life_days is None:
+            return EXPIRY_WARN_DAYS
+        return min(EXPIRY_WARN_DAYS, item.shelf_life_days // 2)
+
+    def alerts_due(self) -> set[tuple[str, UUID, UUID | None]]:
+        """What should be open, as (type, item_id, batch_id), from the snapshots.
+
+        Written out here rather than reusing the domain's query, so the
+        invariant checks the rules themselves, not only that the writes and a
+        fresh evaluation agree.
+        """
+        due: set[tuple[str, UUID, UUID | None]] = set()
+        for item, _ in self.items:
+            usable = Decimal(0)
+            for snapshot in self.snapshots(item.id).values():
+                batch = snapshot.batch
+                # Dates are judged against the alerts date; before the first
+                # sweep nothing has expired or is expiring.
+                dated = self.swept_on is not None and batch.expires_on is not None
+                expired = dated and batch.expires_on < self.swept_on
+                if not expired:
+                    usable += batch.on_hand
+                if batch.is_default and batch.on_hand < 0:
+                    due.add(("negative_stock", item.id, batch.id))
+                if batch.on_hand > 0 and expired:
+                    due.add(("expired", item.id, batch.id))
+                if batch.on_hand > 0 and dated and not expired:
+                    if (batch.expires_on - self.swept_on).days <= self.expiry_window(item):
+                        due.add(("expiring", item.id, batch.id))
+            reorder_point = self.reorder_points.get(item.id)
+            if reorder_point is not None and usable <= reorder_point:
+                due.add(("low_stock", item.id, None))
+        return due
+
+    @invariant()
+    def open_alerts_are_exactly_what_is_due(self) -> None:
+        """Rule 10 (D59), against the Python evaluation and against check_alerts."""
+        open_alerts = self.db.execute(
+            select(Alert.type, Alert.item_id, Alert.batch_id).where(
+                Alert.business_id == self.business_id, Alert.status == "open"
+            )
+        ).all()
+        assert len(open_alerts) == len(set(open_alerts))
+        assert {tuple(row) for row in open_alerts} == self.alerts_due()
+        assert check_alerts(self.db, self.business_id) == []
 
 
 def test_ledger_rules_hold_for_random_requests(engine: Engine) -> None:

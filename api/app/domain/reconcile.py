@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.domain.alerts import check_alerts
 from app.domain.stock import rebuild_balances
 from app.models import Batch, Item, ReceiptLine, StockCountLine, StockMovement
 
@@ -19,8 +20,8 @@ class Problem:
     """One way the ledger fails to reconcile.
 
     kind is one of balance_mismatch, negative_batch, default_batch_count,
-    receipt_line_unposted, receipt_line_mismatch, count_line_unposted or
-    count_line_mismatch.
+    receipt_line_unposted, receipt_line_mismatch, count_line_unposted,
+    count_line_mismatch, alert_missing or alert_not_due.
     """
 
     kind: str
@@ -35,6 +36,7 @@ def reconcile(session: Session, business_id: UUID) -> list[Problem]:
         *_default_batch_counts(session, business_id),
         *_receipt_line_problems(session, business_id),
         *_count_line_problems(session, business_id),
+        *_alert_problems(session, business_id),
     ]
 
 
@@ -227,3 +229,39 @@ def _count_line_problems(session: Session, business_id: UUID) -> list[Problem]:
                 )
             )
     return problems
+
+
+def _alert_problems(session: Session, business_id: UUID) -> list[Problem]:
+    """The open alerts equal a fresh evaluation of every item's stock (D59).
+
+    Dates are judged as of the business's alerts date, the date of its last
+    sweep (D61), so this holds at any time of day, not only right after a
+    sweep. alert_missing is an alert that is due but not open; alert_not_due
+    is an open alert whose condition no longer holds.
+    """
+    differences = check_alerts(session, business_id)
+    if not differences:
+        return []
+    skus = dict(
+        session.execute(
+            select(Item.id, Item.sku).where(
+                Item.business_id == business_id,
+                Item.id.in_({d.key.item_id for d in differences}),
+            )
+        ).all()
+    )
+    batch_ids = [d.key.batch_id for d in differences if d.key.batch_id is not None]
+    labels = _batch_labels(session, business_id, batch_ids)
+
+    problems = []
+    for difference in differences:
+        key = difference.key
+        # A low_stock alert has no batch: it is about the item at the location.
+        what = skus[key.item_id] if key.batch_id is None else labels[key.batch_id]
+        alert = f"{key.type} alert for {what} at location {key.location_id}"
+        if difference.kind == "missing":
+            problems.append(Problem("alert_missing", f"{alert} is due but not open"))
+        else:
+            problems.append(Problem("alert_not_due", f"{alert} is open but no longer due"))
+    # check_alerts returns rows in no particular order; this keeps the report fixed.
+    return sorted(problems, key=lambda problem: (problem.kind, problem.message))
