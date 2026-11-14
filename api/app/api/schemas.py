@@ -248,6 +248,43 @@ class StockEntryOut(BaseModel):
     batches: list[StockBatchOut]
 
 
+# --- GET /alerts ---------------------------------------------------------------
+
+
+class AlertBatchOut(BaseModel):
+    """The batch an alert is about, with what it holds now."""
+
+    id: UUID
+    # True for a negative_stock alert, which is about the item's default batch.
+    is_default: bool
+    expires_on: date | None
+    lot_code: str | None
+    # The batch's balance now, in the item's base unit, not when the alert was raised.
+    on_hand: Quantity
+
+
+class AlertOut(BaseModel):
+    """One alert: an episode of low stock, of a batch expiring or expired, or
+    of a default batch below zero."""
+
+    id: UUID
+    # low_stock, expiring, expired or negative_stock.
+    type: str
+    # open or resolved.
+    status: str
+    # Business time: the write's occurred_at, or the time the sweep ran as of.
+    raised_at: Timestamp
+    resolved_at: Timestamp | None
+    location_id: UUID
+    location_name: str
+    item_id: UUID
+    sku: str
+    item_name: str
+    base_unit: str
+    # Null for low_stock, which is about the item at the location.
+    batch: AlertBatchOut | None
+
+
 # --- GET /catalogue ------------------------------------------------------------
 
 
