@@ -67,6 +67,10 @@ If a command stops matching the code, fix the code or update this section in the
 - Database tests use a separate test database (`stock_test`) on the same Postgres, created by the test setup. Each test runs in a transaction that is rolled back, so tests never delete ledger rows. No testcontainers.
 - In Hypothesis tests that touch the database, open and roll back a transaction inside each example, because function-scoped fixtures don't reset between examples.
 
+## Autonomous run (temporary, D58)
+
+Week 2's tasks 2–7 run autonomously under `docs/run-plan.md`, which overrides the Workflow section below and the "stop and ask" and "don't edit `docs/`" lines under Project, until the run's final pull request into main is open. In a new session or after compaction, read `docs/run-plan.md` and `docs/run-log.md` before doing anything else. When compacting, keep the current task, branch and step, open PR numbers, the next decision ID and the For Yazan items. Claude Code squash-merges its own task pull requests into `run/week-2` once CI is green; it never pushes to main, merges into main, or marks the final pull request ready.
+
 ## Workflow
 
 - Plan first. Before writing code, give a short plan (files to change, tests to add) and wait for approval.
