@@ -27,7 +27,7 @@ from app.domain.alerts import (
     sweep_alerts_if_due,
 )
 from app.domain.errors import DomainError
-from app.models import Alert, Batch, Business, Item, StockBalance
+from app.models import Alert, Batch, Business, Item, ItemUnit, StockBalance
 from tests.builders import (
     Catalogue,
     add,
@@ -38,6 +38,17 @@ from tests.builders import (
     new_item,
     new_location,
     new_par_level,
+)
+from tests.test_counts import do_count, tracked, untracked
+from tests.test_stock import (
+    assert_reconciled,
+    default_batch,
+    do_receive,
+    do_reverse,
+    do_use,
+    do_waste,
+    line,
+    milk,
 )
 
 
@@ -542,3 +553,152 @@ def test_check_alerts_judges_dates_as_of_the_last_sweep(db_session: Session, cat
     # The batch expired days ago by the wall clock, but the check judges as of
     # the alerts date, 10 Nov, when it was still expiring.
     assert check_alerts(db_session, cat.business.id) == []
+
+
+# --- Through the stock writes ---------------------------------------------------
+#
+# Every write re-evaluates the items it touched (D59). Each test ends by
+# checking that the open alerts equal a fresh evaluation and that the balances
+# still match the ledger.
+
+
+def assert_in_line(db: Session, cat: Catalogue) -> None:
+    assert check_alerts(db, cat.business.id) == []
+    assert_reconciled(db, cat)
+
+
+def test_a_shortfall_raises_negative_stock_and_the_next_receipt_resolves_it(
+    db_session: Session, cat: Catalogue
+):
+    # Nothing was received, so the whole usage falls on the default batch.
+    do_use(db_session, cat, cat.item, "500", occurred_at=nov(10))
+    default = default_batch(db_session, cat, cat.item)
+    (alert,) = alerts(db_session, cat)
+    assert (alert.type, alert.batch_id, alert.raised_at) == ("negative_stock", default.id, nov(10))
+
+    # The receipt settles the shortfall (domain rule 4), and the alert resolves.
+    do_receive(db_session, cat, milk(cat, "1"), received_at=nov(11))
+
+    assert open_alerts(db_session, cat) == set()
+    (resolved,) = alerts(db_session, cat, "resolved")
+    assert (resolved.id, resolved.resolved_at) == (alert.id, nov(11))
+    assert_in_line(db_session, cat)
+
+
+def test_usage_down_to_the_reorder_point_raises_low_stock_and_a_receipt_resolves_it(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+):
+    item, sack = flour  # 25 kg sacks, no batch tracking
+    add(
+        db_session,
+        new_par_level(cat.location, item, reorder_point=d("5000"), order_up_to=d("50000")),
+    )
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(9))
+    assert open_alerts(db_session, cat) == set()
+
+    do_use(db_session, cat, item, "19999", occurred_at=nov(10, 8))
+    assert open_alerts(db_session, cat) == set()  # 5001 left: above the reorder point
+    do_use(db_session, cat, item, "1", occurred_at=nov(10, 9))
+    (alert,) = alerts(db_session, cat)
+    assert (alert.type, alert.item_id, alert.raised_at) == ("low_stock", item.id, nov(10, 9))
+
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(11))
+    assert open_alerts(db_session, cat) == set()
+    assert_in_line(db_session, cat)
+
+
+def test_a_receipt_evaluates_every_item_on_it(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+):
+    item, sack = flour
+    add(db_session, new_par_level(cat.location, cat.item))
+    add(db_session, new_par_level(cat.location, item))
+    sweep(db_session, cat, nov(9))
+    assert {(a.type, a.item_id) for a in alerts(db_session, cat)} == {
+        ("low_stock", cat.item.id),
+        ("low_stock", item.id),
+    }
+
+    do_receive(
+        db_session, cat, milk(cat, "7"), line(item, sack, "1", "12.500"), received_at=nov(10)
+    )
+
+    assert open_alerts(db_session, cat) == set()
+    assert_in_line(db_session, cat)
+
+
+def test_wasting_an_expired_batch_resolves_its_alert_and_reversing_the_waste_raises_a_new_one(
+    db_session: Session, cat: Catalogue
+):
+    received = do_receive(db_session, cat, milk(cat, "2", expires_day=8), received_at=nov(5))
+    batch_id = received.movements[0].batch_id
+    sweep(db_session, cat, nov(10))
+    assert open_alerts(db_session, cat) == {("expired", batch_id)}
+
+    wasted = do_waste(db_session, cat, cat.item, batch_id, "2000", "expired", nov(10, 10))
+    assert open_alerts(db_session, cat) == set()
+
+    # The reversal puts the stock back, dated at the waste it reverses.
+    do_reverse(db_session, cat, wasted.movements[0].client_id)
+    assert open_alerts(db_session, cat) == {("expired", batch_id)}
+    first, second = sorted(
+        alerts(db_session, cat, "resolved") + alerts(db_session, cat), key=lambda a: a.raised_at
+    )
+    assert (first.raised_at, first.resolved_at) == (nov(10), nov(10, 10))
+    assert (second.raised_at, second.resolved_at) == (nov(10, 10), None)
+    assert_in_line(db_session, cat)
+
+
+def test_a_count_raises_and_resolves_alerts_for_the_items_it_counts(
+    db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
+):
+    item, sack = flour
+    add(
+        db_session,
+        new_par_level(cat.location, item, reorder_point=d("5000"), order_up_to=d("50000")),
+    )
+    do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(5))
+    expired = do_receive(db_session, cat, milk(cat, "2", expires_day=8), received_at=nov(5))
+    batch_id = expired.movements[0].batch_id
+    sweep(db_session, cat, nov(10))
+    assert open_alerts(db_session, cat) == {("expired", batch_id)}
+
+    # The count finds 4 kg of flour, and none of the expired milk.
+    do_count(db_session, cat, untracked(item, "4000"), tracked(cat.item), counted_at=nov(10, 20))
+
+    (alert,) = alerts(db_session, cat)
+    assert (alert.type, alert.item_id, alert.raised_at) == ("low_stock", item.id, nov(10, 20))
+    assert_in_line(db_session, cat)
+
+
+def test_a_write_judges_expiry_by_the_alerts_date_not_by_its_own_date(
+    db_session: Session, cat: Catalogue
+):
+    sweep(db_session, cat, nov(10))
+
+    # Received after the sweep, expiring in two days: expiring at once.
+    received = do_receive(db_session, cat, milk(cat, "2", expires_day=12), received_at=nov(10, 10))
+    batch_id = received.movements[0].batch_id
+    assert open_alerts(db_session, cat) == {("expiring", batch_id)}
+
+    # A waste on the 14th, past the expiry date, doesn't make it expired: only
+    # the sweep moves the alerts date (D61).
+    do_waste(db_session, cat, cat.item, batch_id, "500", "spoiled", nov(14))
+    assert open_alerts(db_session, cat) == {("expiring", batch_id)}
+    assert_in_line(db_session, cat)
+
+    sweep(db_session, cat, nov(14))
+    assert open_alerts(db_session, cat) == {("expired", batch_id)}
+    assert_in_line(db_session, cat)
+
+
+def test_a_replay_evaluates_nothing(db_session: Session, cat: Catalogue):
+    client_id = uuid.uuid4()
+    do_use(db_session, cat, cat.item, "500", occurred_at=nov(10), client_id=client_id)
+    # Out of line on purpose: a write would resolve this, a replay must not.
+    planted = add(db_session, new_alert(cat.location, cat.item, raised_at=nov(10)))
+
+    replay = do_use(db_session, cat, cat.item, "500", occurred_at=nov(10), client_id=client_id)
+
+    assert replay.replayed
+    assert planted.id in {alert.id for alert in alerts(db_session, cat)}
