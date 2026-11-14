@@ -26,6 +26,8 @@ from app.models import (
     ItemUnit,
     Location,
     ParLevel,
+    PurchaseOrder,
+    PurchaseOrderLine,
     Receipt,
     ReceiptLine,
     StockBalance,
@@ -270,6 +272,34 @@ def new_alert(location: Location, item: Item, **overrides: Any) -> Alert:
         "raised_at": OCCURRED_AT,
     }
     return Alert(**(values | overrides))
+
+
+def new_purchase_order(location: Location, supplier: Supplier, **overrides: Any) -> PurchaseOrder:
+    """A draft order to the supplier for the location.
+
+    For another status, pass it with its times: sent_at for sent, and also
+    received_at or cancelled_at for the closed ones.
+    """
+    values = {
+        "business_id": location.business_id,
+        "location_id": location.id,
+        "supplier_id": supplier.id,
+    }
+    return PurchaseOrder(**(values | overrides))
+
+
+def new_order_line(
+    order: PurchaseOrder, item: Item, unit: ItemUnit, **overrides: Any
+) -> PurchaseOrderLine:
+    """A line for the item, suggesting 4 packs of the unit, with no owner's number."""
+    values = {
+        "business_id": order.business_id,
+        "po_id": order.id,
+        "item_id": item.id,
+        "item_unit_id": unit.id,
+        "suggested_packs": 4,
+    }
+    return PurchaseOrderLine(**(values | overrides))
 
 
 # --- Whole datasets -----------------------------------------------------------

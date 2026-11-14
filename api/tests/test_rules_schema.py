@@ -1,4 +1,4 @@
-"""Database constraints on par_levels and alerts.
+"""Database constraints on par_levels, alerts and purchase orders.
 
 Same approach as test_stock_schema.py: each rejected row runs in a savepoint,
 and we check the name of the constraint Postgres reports. Every bad row breaks
@@ -24,7 +24,12 @@ from tests.builders import (
     assert_rejected,
     new_alert,
     new_location,
+    new_order_line,
     new_par_level,
+    new_purchase_order,
+    new_receipt,
+    new_supplier,
+    new_unit,
 )
 
 LATER = OCCURRED_AT + timedelta(hours=3)
@@ -234,6 +239,181 @@ def test_alert_cannot_name_another_business_batch(
     c = stock.cat
     row = new_alert(c.location, c.item, type="expired", batch_id=other_stock.batch.id)
     assert_rejected(db_session, row, "fk_alerts_business_id_location_id_item_id_batch_id_batches")
+
+
+# --- Purchase orders ----------------------------------------------------------
+
+
+def sent(**overrides: Any) -> dict[str, Any]:
+    """Column values of a sent order; pass more to make it received or cancelled."""
+    return {"status": "sent", "sent_at": OCCURRED_AT} | overrides
+
+
+def test_valid_order_rows_get_server_defaults(db_session: Session, stock: Stock) -> None:
+    c = stock.cat
+    order = add(db_session, new_purchase_order(c.location, c.supplier))
+    line = add(db_session, new_order_line(order, c.item, c.unit))
+
+    assert order.id.version == 7  # uuidv7()
+    assert order.status == "draft"
+    assert (order.sent_at, order.received_at, order.cancelled_at) == (None, None, None)
+    assert line.qty_packs is None  # as suggested
+    assert line.suggested_packs == 4
+
+
+def test_each_order_status_takes_its_times(db_session: Session, stock: Stock) -> None:
+    c = stock.cat
+    add(db_session, new_purchase_order(c.location, c.supplier, **sent()))
+    add(
+        db_session,
+        new_purchase_order(c.location, c.supplier, **sent(status="received", received_at=LATER)),
+    )
+    add(
+        db_session,
+        new_purchase_order(c.location, c.supplier, **sent(status="cancelled", cancelled_at=LATER)),
+    )
+    # A line whose owner says not to order it.
+    draft = add(db_session, new_purchase_order(c.location, c.supplier))
+    add(db_session, new_order_line(draft, c.item, c.unit, qty_packs=0))
+
+
+def test_one_draft_per_supplier_and_location_beside_any_number_of_others(
+    db_session: Session, stock: Stock
+) -> None:
+    c = stock.cat
+    second_location = add(db_session, new_location(c.business.id, name="Second branch"))
+    second_supplier = add(db_session, new_supplier(c.business.id, name="Bakery Co"))
+    add(db_session, new_purchase_order(c.location, c.supplier))
+    add(db_session, new_purchase_order(c.location, c.supplier, **sent()))
+    add(db_session, new_purchase_order(c.location, c.supplier, **sent()))
+    add(db_session, new_purchase_order(second_location, c.supplier))
+    add(db_session, new_purchase_order(c.location, second_supplier))
+
+    row = new_purchase_order(c.location, c.supplier)
+    assert_rejected(db_session, row, "uq_purchase_orders_one_draft_per_location_supplier")
+
+
+BAD_ORDERS: list[Any] = [
+    pytest.param(
+        # With sent_at, so the unknown status breaks only the status check.
+        sent(status="shipped"),
+        "ck_purchase_orders_status",
+        id="order-status",
+    ),
+    pytest.param(
+        {"sent_at": OCCURRED_AT},
+        "ck_purchase_orders_sent_at_unless_draft",
+        id="draft-with-sent-at",
+    ),
+    pytest.param(
+        {"status": "sent"},
+        "ck_purchase_orders_sent_at_unless_draft",
+        id="sent-without-sent-at",
+    ),
+    pytest.param(
+        sent(status="received"),
+        "ck_purchase_orders_received_at_iff_received",
+        id="received-without-received-at",
+    ),
+    pytest.param(
+        sent(received_at=LATER),
+        "ck_purchase_orders_received_at_iff_received",
+        id="sent-with-received-at",
+    ),
+    pytest.param(
+        sent(status="cancelled"),
+        "ck_purchase_orders_cancelled_at_iff_cancelled",
+        id="cancelled-without-cancelled-at",
+    ),
+    pytest.param(
+        sent(cancelled_at=LATER),
+        "ck_purchase_orders_cancelled_at_iff_cancelled",
+        id="sent-with-cancelled-at",
+    ),
+]
+
+
+@pytest.mark.parametrize(("values", "constraint"), BAD_ORDERS)
+def test_order_constraint_rejects_bad_row(
+    db_session: Session, stock: Stock, values: dict[str, Any], constraint: str
+) -> None:
+    row = new_purchase_order(stock.cat.location, stock.cat.supplier, **values)
+    assert_rejected(db_session, row, constraint)
+
+
+def test_order_line_constraints(db_session: Session, stock: Stock, other: Catalogue) -> None:
+    c = stock.cat
+    order = add(db_session, new_purchase_order(c.location, c.supplier))
+    flour_unit = add(db_session, new_unit(stock.flour, name="sack"))
+
+    def rejected(row: Base, constraint: str) -> None:
+        assert_rejected(db_session, row, constraint)
+
+    rejected(
+        new_order_line(order, c.item, c.unit, suggested_packs=0),
+        "ck_purchase_order_lines_suggested_packs_positive",
+    )
+    rejected(
+        new_order_line(order, c.item, c.unit, qty_packs=-1),
+        "ck_purchase_order_lines_qty_packs_non_negative",
+    )
+    # The unit must be one of the line's item's units.
+    rejected(
+        new_order_line(order, c.item, flour_unit),
+        "fk_purchase_order_lines_item_id_item_unit_id_item_units",
+    )
+    # One line per item per order.
+    add(db_session, new_order_line(order, c.item, c.unit))
+    rejected(new_order_line(order, c.item, c.unit), "uq_purchase_order_lines_po_id_item_id")
+    add(db_session, new_order_line(order, stock.flour, flour_unit))
+
+
+def test_order_rows_cannot_cross_businesses(
+    db_session: Session, stock: Stock, other: Catalogue
+) -> None:
+    c = stock.cat
+    row = new_purchase_order(other.location, c.supplier, business_id=c.business.id)
+    assert_rejected(db_session, row, "fk_purchase_orders_business_id_location_id_locations")
+    row = new_purchase_order(c.location, other.supplier)
+    assert_rejected(db_session, row, "fk_purchase_orders_business_id_supplier_id_suppliers")
+
+    theirs = add(db_session, new_purchase_order(other.location, other.supplier))
+    row = new_order_line(theirs, c.item, c.unit, business_id=c.business.id)
+    assert_rejected(db_session, row, "fk_purchase_order_lines_business_id_po_id_purchase_orders")
+    row = new_order_line(theirs, c.item, c.unit)
+    assert_rejected(db_session, row, "fk_purchase_order_lines_business_id_item_id_items")
+
+
+# --- Receipts against an order ------------------------------------------------
+
+
+def test_a_receipt_names_an_order_of_its_own_supplier_and_location_once(
+    db_session: Session, stock: Stock
+) -> None:
+    c = stock.cat
+    order = add(db_session, new_purchase_order(c.location, c.supplier, **sent()))
+    second_location = add(db_session, new_location(c.business.id, name="Second branch"))
+    second_supplier = add(db_session, new_supplier(c.business.id, name="Bakery Co"))
+
+    # Another supplier's delivery, or one at another location, can't close it.
+    row = new_receipt(c.location, second_supplier, po_id=order.id)
+    assert_rejected(db_session, row, "fk_receipts_purchase_order")
+    row = new_receipt(second_location, c.supplier, po_id=order.id)
+    assert_rejected(db_session, row, "fk_receipts_purchase_order")
+
+    add(db_session, new_receipt(c.location, c.supplier, po_id=order.id))
+    # One receipt per order.
+    row = new_receipt(c.location, c.supplier, po_id=order.id)
+    assert_rejected(db_session, row, "uq_receipts_po_id")
+
+
+def test_a_receipt_cannot_name_another_business_order(
+    db_session: Session, stock: Stock, other: Catalogue
+) -> None:
+    c = stock.cat
+    theirs = add(db_session, new_purchase_order(other.location, other.supplier, **sent()))
+    row = new_receipt(c.location, c.supplier, po_id=theirs.id)
+    assert_rejected(db_session, row, "fk_receipts_purchase_order")
 
 
 # --- Required times -----------------------------------------------------------
