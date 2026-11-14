@@ -5,20 +5,25 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: step 0
-- Branch and PR: run/week-2
-- Done so far: step 0's doc changes (decisions D49–D58, this log, CLAUDE.md's run section) and the baseline
-- Next: task 2 (par levels and alerts), from the loop's step 1, on `feat/alerts`
-- Next decision ID: D59
-- Updated: 2026-11-14 17:45 (this machine's clock, UTC)
+- Task and step: task 2, step 4 (build)
+- Branch and PR: feat/alerts, no PR yet
+- Done so far: step 0 (commit 6f0c1b5 on run/week-2); task 2's decisions D59–D65 and plan
+- Next: build task 2 in the commit order of its plan below
+- Next decision ID: D66 (task 2's details row)
+- Updated: 2026-11-14 18:05
 
 ## For Yazan (look at these first)
 
-- None yet.
+- **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 and 4 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
+- **D62: GET /alerts writes.** It runs the sweep when the local date has moved on, so a GET can raise and resolve alerts. The alternatives were a CLI command (nothing runs it outside the simulator) or the API's start-up (stale from the next day).
+- **D63: the expiry window's formula** (min of expiry_warn_days and half the shelf life) is my number; see Assumptions.
 
 ## Assumptions
 
-- None yet.
+- Half the shelf life is the cap on an item's expiry window (D63). The docs give only expiry_warn_days per business. Used in `app/domain/alerts.py`.
+- A negative default batch counts against usable on-hand (D64): the shortfall is stock the ledger says was used, so the best estimate of what is left is the sum. Used by low stock, and by draft lines in task 3.
+- An alert the sweep raises takes the time the sweep runs as of (the plan's wording), not the midnight the batch actually crossed its date. On GET /alerts that is the time of the read (D62).
+- An inactive item still raises expiring, expired and negative-stock alerts while it holds stock, because that stock still has to be used, wasted or explained; only low stock looks at is_active (D64).
 
 ## Baseline (main at 0e75a8c)
 
@@ -30,9 +35,16 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 2: par levels and alerts
 
-- Branch, PR, merge commit:
-- Plan:
-- Decisions:
+- Branch, PR, merge commit: feat/alerts
+- Plan: one commit per step, each with its tests.
+  1. Tables: `par_levels`, `alerts` and `businesses.alerts_swept_on` (models in `app/models/rules.py`, one migration, builders, schema tests in `tests/test_rules_schema.py`).
+  2. `app/domain/alerts.py`: `evaluate_alerts(session, business_id, pairs, at)` (lock the business row FOR SHARE, then one statement: what is due for the touched items, resolve what isn't, raise what's missing) and `sweep_alerts(session, business_id, as_of)`. Worked examples in `tests/test_alerts.py`, calling evaluate directly on rows from the builders.
+  3. Call `evaluate_alerts` at the end of receive, use, waste, reverse (`stock.py`) and `count_stock` (`counts.py`), with the default-batch keys each one locked and its own time. Worked examples through the domain functions.
+  4. reconcile: `alert_missing` and `alert_not_due`, from the same "what is due" query. Tests in `tests/test_reconcile.py`.
+  5. Property machine: par levels for milk and flour, a sweep rule, and an invariant that the open alerts equal a Python evaluation of the snapshots.
+  6. GET /alerts (`app/api/alerts.py`, schemas), with the sweep when the date has moved on. Tests in `tests/test_api_alerts.py`.
+  7. Docs: `docs/schema.md` (tables, rule 10, constraints, indexes), CLAUDE.md hard rule 6's text, README's endpoint list.
+- Decisions: D59 alerts are a projection kept by every write, proved by reconcile; D60 granularity, the open key with location, lifecycle; D61 the alerts date and its lock; D62 what runs the sweep; D63 the expiry window; D64 usable on-hand and low stock; D65 GET /alerts.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
