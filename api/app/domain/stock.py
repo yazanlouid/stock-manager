@@ -21,7 +21,7 @@ from uuid import UUID
 from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.orm import Session
 
-from app.domain.checks import check_money, check_quantity
+from app.domain.checks import check_money, check_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
 from app.models import (
@@ -342,13 +342,6 @@ def _check_source(source: str) -> None:
         raise DomainError(f"source must be one of {', '.join(sorted(SOURCES))}, got {source!r}")
 
 
-def _check_timestamp(value: datetime, name: str) -> None:
-    if not isinstance(value, datetime):
-        raise TypeError(f"{name} must be a datetime, not {type(value).__name__}")
-    if value.utcoffset() is None:
-        raise DomainError(f"{name} must include a timezone")
-
-
 def iso_utc(value: datetime) -> str:
     """A timestamp for an error message, in UTC: 2026-11-02T07:30:00Z."""
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -553,7 +546,7 @@ def receive(
     after its receive (domain rule 4): a settle pair moves min(qty, shortfall)
     out of the new batch and into the default batch, at the new batch's cost.
     """
-    _check_timestamp(received_at, "received_at")
+    check_timestamp(received_at, "received_at")
     _check_source(source)
     if not lines:
         raise DomainError("a receipt needs at least one line")
@@ -684,7 +677,7 @@ def use(
     default batch that has never received anything.
     """
     check_quantity(quantity)
-    _check_timestamp(occurred_at, "occurred_at")
+    check_timestamp(occurred_at, "occurred_at")
     _check_source(source)
 
     replayed = _replay(session, business_id, client_id, {"usage"})
@@ -748,7 +741,7 @@ def waste(
     received_at is when it was created, so that rule never applies to it.
     """
     check_quantity(quantity)
-    _check_timestamp(occurred_at, "occurred_at")
+    check_timestamp(occurred_at, "occurred_at")
     _check_source(source)
     if reason not in WASTE_REASONS:
         raise DomainError(

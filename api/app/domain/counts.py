@@ -22,12 +22,11 @@ from uuid import UUID
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from app.domain.checks import ZERO, check_counted_quantity
+from app.domain.checks import ZERO, check_counted_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.stock import (
     _BatchState,
     _check_source,
-    _check_timestamp,
     _check_user,
     _get,
     _latest_counts,
@@ -114,7 +113,7 @@ def count_stock(
     after every movement of the item there and after its latest count, and
     stock.py then refuses any write for the item there dated at or before it.
     """
-    _check_timestamp(counted_at, "counted_at")
+    check_timestamp(counted_at, "counted_at")
     _check_source(source)
     _check_input(items)
 
