@@ -31,6 +31,7 @@ from app.sim import simulator
 from app.sim.cafe import CAFE
 from app.sim.seed import PLACEHOLDER_PASSWORD_HASH, seed
 from app.sim.simulator import SimulationError, simulate
+from tests.test_alerts import recorded_statements
 
 END_DATE = date(2026, 10, 31)
 # Asia/Amman has been UTC+3 all year since October 2022 (see test_stock_properties.py).
@@ -297,6 +298,23 @@ def test_without_an_end_date_the_run_ends_today_in_the_business_timezone(db_sess
     assert summary.end_date == today
     assert summary.opening_day == today - timedelta(days=1)
     assert local_dates(db_session, business_id) == (summary.opening_day, today)
+
+
+def test_the_simulator_analyzes_after_the_opening_day_and_then_every_few_days(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """D75: the planner needs statistics for the tables the run is filling.
+
+    Every 2 days here instead of every 7, so three simulated days show it.
+    """
+    monkeypatch.setattr(simulator, "ANALYZE_EVERY_DAYS", 2)
+    business_id = seed(db_session, CAFE)
+
+    with recorded_statements(db_session) as statements:
+        simulate(db_session, business_id, venue=CAFE, days=3, end_date=END_DATE)
+
+    # After day 0 (the opening stock) and day 2, of days 0 to 3.
+    assert statements.count("ANALYZE") == 2
 
 
 def test_a_failed_day_is_rolled_back_and_earlier_days_are_kept(

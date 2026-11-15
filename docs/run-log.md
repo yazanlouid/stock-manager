@@ -5,15 +5,16 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 3, step 4 (build)
-- Branch and PR: feat/draft-orders, no PR yet
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3's decisions D67–D73 and plan
-- Next: build task 3 in the commit order of its plan below
-- Next decision ID: D74 (task 3's details row)
-- Updated: 2026-11-14 18:47
+- Task and step: task 3, step 6 (PR), then 7 (review) and 8 (CI and merge)
+- Branch and PR: feat/draft-orders, PR to be opened
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 built and checked on feat/draft-orders (D67–D75)
+- Next: open task 3's PR into run/week-2, review it with fresh eyes, fix findings, merge when CI is green, then start task 4 on `feat/sim-week2`
+- Next decision ID: D76
+- Updated: 2026-11-15 14:26
 
 ## For Yazan (look at these first)
 
+- **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
 - **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 and 4 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
 - **D62: GET /alerts writes.** It runs the sweep when the local date has moved on, so a GET can raise and resolve alerts. The alternatives were a CLI command (nothing runs it outside the simulator) or the API's start-up (stale from the next day).
@@ -85,10 +86,22 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   5. reconcile: draft-line problems. Property machine: a preferred supplier for flour, rules to send, cancel and receive against an order, and the draft-lines invariant in Python.
   6. API: GET /orders, GET /orders/{id}, PUT a line, POST send and cancel, `po_id` on POST /receipts.
   7. Docs: `docs/schema.md`, CLAUDE.md, README.
-- Decisions: D67 draft lines are a projection; D68 when a line is due and for how much; D69 statuses, no origin; D70 whole packs, qty_packs and suggested_packs; D71 receiving against an order; D72 order actions lock the business row; D73 endpoints.
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
+- Decisions: D67 draft lines are a projection; D68 when a line is due and for how much; D69 statuses, no origin; D70 whole packs, qty_packs and suggested_packs; D71 receiving against an order; D72 order actions lock the business row; D73 endpoints; D75 the simulator analyzes as it fills the database (found while measuring this task).
+- Details row: D74.
+- Checks:
+  - `uv run pytest`: 543 passed in 171.7 s (457 after task 2). Gate 1's test 51.4 s, the property machine 43.8 s, the determinism test 24.1 s. The machine ran about a third slower on 15 Nov than on 14 Nov (the simulation without any rules evaluation took about 39 s in a profile, against 33 s), so compare these with each other, not with task 2's.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 66 files.
+  - Migration round trip on the dev database (upgrade, downgrade -1, upgrade): `af5e5eafee1d -> 6f33477b5349` each way, and reconcile OK afterwards.
+  - `reset --end-date 2026-10-31`: 49.7 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline. No draft orders yet: the simulator sets no par levels until task 4.
+  - reconcile: Dar Zaatar Café OK (now including the draft-line and order-line checks).
+  - `git diff --check run/week-2...HEAD`: nothing.
 - Review: findings and what was done
 - Notes:
+  - **Gate 1's time, looked into (the plan's 20% rule).** After the draft-line evaluation went into the writes, gate 1's test read 73.5 s and 60.5 s. A profile of the 30 days gave 64.6 s, with 8.95 s in the alerts statement (2.5 s in task 2) and 8.89 s in the draft-line statement. The cause was not the new code: `stock_test` had statistics from when it was empty, so the planner read whole tables. From a schema with no statistics the same code took 44.7 s (alerts 2.76 s, draft lines 2.83 s); after an ANALYZE of the empty database, 64.5 s; with the simulator analyzing as it goes (D75), 48.3 s from that same bad state. So the draft-line evaluation costs about 2.8 s of a 45 s run, about 6%, and task 2's alerts about the same.
+  - I first tried passing the item pairs as VALUES rows instead of two arrays, so a cached plan would know how many pairs there are. With real statistics it made no difference, so it is not in the PR. The experiment is in a git stash on this machine ("values rows experiment"); the plan rules out dropping stashes, so it stays there and can be dropped by hand.
+  - To reproduce the bad state I recreated `stock_test`'s schema (Alembic downgrade to base and upgrade, on the test database only) and ran ANALYZE on it while empty. The test database holds no data between tests, so nothing was lost.
+  - The property machine failed once in the full run, in the new `send_draft` rule. It was the test's own expectation, not the domain: a line left alone keeps the owner's number from an earlier refused send, and the rule assumed it ordered the suggestion. Fixed in the test; it then passed three runs in a row. A mutation check (CEIL changed to FLOOR in the draft-line query) was caught.
+  - A refused receipt against an order first raised its error after writing the receipt's movements (the API would have rolled them back, but a domain function refuses before it writes). The order is now closed as the last check, before anything is written, and a test checks nothing is left behind.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
@@ -137,3 +150,6 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-14 18:40: PR #10 reviewed (seven findings, six fixed, one declined) and the fixes pushed.
 - 2026-11-14 18:44: PR #10 green (CI 1m27s) and squash-merged into run/week-2 as 464444a.
 - 2026-11-14 18:47: task 3 started on feat/draft-orders.
+- 2026-11-14 about 19:05: the session stopped mid-task 3 (uncommitted: order actions and po_id on receive); nothing was lost.
+- 2026-11-15 13:38: resumed in the same session after Yazan's "continue the run" (model unchanged: Claude Fable 5.2). The working tree held the uncommitted order actions, which were finished, tested and committed (c9c3699).
+- 2026-11-15 14:26: task 3 built and checked.

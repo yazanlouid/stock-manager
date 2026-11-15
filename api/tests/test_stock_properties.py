@@ -659,17 +659,23 @@ class StockLedgerMachine(RuleBasedStateMachine):
     @precondition(lambda self: self.draft_lines())
     @rule(hour=HOURS, data=st.data())
     def send_draft(self, hour: int, data: st.DataObject) -> None:
-        """The owner sets a number on some lines (fewer, more or none), then sends."""
+        """The owner sets a number on some lines (fewer, more or none), then sends.
+
+        A line left alone orders what it already said: the number from an
+        earlier attempt that was refused, or else the suggestion.
+        """
         lines = self.draft_lines()
         order_id = lines[0].po_id
         ordered: dict[UUID, int] = {}
         for line in lines:
             qty = data.draw(st.one_of(st.none(), st.integers(0, 8)))
-            if qty is not None:
+            if qty is None:
+                qty = line.suggested_packs if line.qty_packs is None else line.qty_packs
+            else:
                 set_line_quantity(
                     self.db, self.business_id, order_id=order_id, line_id=line.id, qty_packs=qty
                 )
-            ordered[line.item_id] = line.suggested_packs if qty is None else qty
+            ordered[line.item_id] = qty
 
         send = partial(
             send_order, self.db, self.business_id, order_id=order_id, sent_at=self.at(hour)
