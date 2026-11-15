@@ -33,7 +33,9 @@ from tests.builders import (
     new_default_batch,
     new_item,
     new_movement,
+    new_order_line,
     new_par_level,
+    new_purchase_order,
     new_receipt,
     new_receipt_line,
     new_receive,
@@ -287,6 +289,53 @@ def test_a_resolved_alert_is_history_and_never_a_problem(db_session: Session, ca
     add(db_session, new_alert(cat.location, cat.item, status="resolved", resolved_at=COUNTED_AT))
 
     assert kinds(db_session, cat) == []
+
+
+def test_a_draft_line_that_is_due_but_missing(db_session: Session, cat: Catalogue):
+    # A par level with no stock, and nothing evaluated: low stock isn't open
+    # and the draft line isn't there.
+    add(db_session, new_par_level(cat.location, cat.item))
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["alert_missing", "draft_line_missing"]
+    assert f"draft line for {cat.item.sku}" in problems[1].message
+    assert "is due (6 packs) but missing" in problems[1].message
+
+
+def test_a_draft_line_that_is_not_due_or_suggests_the_wrong_number(
+    db_session: Session, cat: Catalogue
+):
+    business_id = cat.business.id
+    draft = add(db_session, new_purchase_order(cat.location, cat.supplier))
+    line = add(db_session, new_order_line(draft, cat.item, cat.unit, suggested_packs=4))
+
+    # No par level, so no line is due.
+    problems = reconcile(db_session, business_id)
+    assert [p.kind for p in problems] == ["draft_line_not_due"]
+    assert "suggests 4 packs but is no longer due" in problems[0].message
+
+    # With a par level and no stock, six packs are due, not four.
+    add(db_session, new_par_level(cat.location, cat.item))
+    sweep(db_session, business_id, at(2, 5))
+    assert reconcile(db_session, business_id) == []
+    line.suggested_packs = 4
+    db_session.flush()
+    problems = reconcile(db_session, business_id)
+    assert [p.kind for p in problems] == ["draft_line_mismatch"]
+    assert "suggests 4 packs but 6 are due" in problems[0].message
+
+
+def test_a_sent_order_line_without_a_quantity(db_session: Session, cat: Catalogue):
+    order = add(
+        db_session, new_purchase_order(cat.location, cat.supplier, status="sent", sent_at=at(2, 5))
+    )
+    add(db_session, new_order_line(order, cat.item, cat.unit))  # qty_packs is NULL
+
+    problems = reconcile(db_session, cat.business.id)
+
+    assert [p.kind for p in problems] == ["order_line_without_quantity"]
+    assert f"({cat.item.sku}) of sent order {order.id}" in problems[0].message
 
 
 def test_problems_are_scoped_to_the_business(db_session: Session, cat: Catalogue, other: Catalogue):
