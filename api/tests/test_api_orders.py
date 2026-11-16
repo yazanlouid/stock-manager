@@ -197,6 +197,7 @@ def test_put_sets_and_clears_the_owner_s_number(client: TestClient, cat: Catalog
     ("body", "status_code"),
     [
         ({"qty_packs": -1}, 400),  # the domain refuses it
+        ({"qty_packs": 3_000_000_000}, 400),  # more than any order, and than an int4
         ({"qty_packs": 2.5}, 422),  # whole packs only
         ({"qty_packs": "4"}, 422),  # a JSON integer, not a string
         ({"qty_packs": True}, 422),

@@ -676,10 +676,17 @@ def _ordered_pairs(
 ) -> list[tuple[UUID, UUID]]:
     """Check the order a receipt names; return the (location_id, item_id) of its lines.
 
-    The order's supplier and location never change, so they are checked here,
-    before any lock (a composite foreign key on receipts enforces them too).
-    Its status can change, so that is checked when the order is closed.
+    The alerts-date lock comes first. It keeps the order actions out, and
+    only they and the stock writes change an order's lines, so the lines read
+    here are the ones the order has when it is closed. Read before the lock,
+    a draft could gain a line and be sent in between, and that item would be
+    left out of the re-evaluation. _lock_defaults takes the same lock again
+    afterwards, which costs a statement and changes nothing.
+
+    The order's supplier and location never change (a composite foreign key
+    on receipts enforces them too). Its status is checked when it is closed.
     """
+    lock_alerts_date(session, business_id)
     order = _get(session, PurchaseOrder, business_id, po_id, "order")
     if order.supplier_id != supplier_id:
         raise DomainError(f"order {po_id} is for another supplier")

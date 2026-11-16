@@ -20,7 +20,9 @@ check a foreign key that has a NULL column, so receipts without an order are
 unaffected, and existing rows need no backfill. That key is named by hand
 because the naming convention would exceed Postgres's 63-character limit.
 
-Pack counts on order lines are integers: orders are placed in whole packs (D70).
+Pack counts on order lines are whole numbers, because orders are placed in whole
+packs (D70), and bigint, because order_up_to over a small factor_to_base can pass
+integer's two billion.
 """
 
 from collections.abc import Sequence
@@ -109,8 +111,8 @@ def upgrade() -> None:
         sa.Column("po_id", sa.Uuid(), nullable=False),
         sa.Column("item_id", sa.Uuid(), nullable=False),
         sa.Column("item_unit_id", sa.Uuid(), nullable=False),
-        sa.Column("suggested_packs", sa.Integer(), nullable=False),
-        sa.Column("qty_packs", sa.Integer(), nullable=True),
+        sa.Column("suggested_packs", sa.BigInteger(), nullable=False),
+        sa.Column("qty_packs", sa.BigInteger(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

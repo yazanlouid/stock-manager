@@ -84,7 +84,7 @@ _DIFFERENCES = text(
                p.item_id,
                si.supplier_id,
                si.item_unit_id,
-               CEIL((p.order_up_to - u.qty - on_order.qty) / unit.factor_to_base)::integer
+               CEIL((p.order_up_to - u.qty - on_order.qty) / unit.factor_to_base)::bigint
                    AS packs
         FROM usable AS u
         JOIN par_levels AS p

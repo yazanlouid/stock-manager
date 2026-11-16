@@ -5,15 +5,16 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 3, step 6 (PR), then 7 (review) and 8 (CI and merge)
-- Branch and PR: feat/draft-orders, PR to be opened
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 built and checked on feat/draft-orders (D67–D75)
-- Next: open task 3's PR into run/week-2, review it with fresh eyes, fix findings, merge when CI is green, then start task 4 on `feat/sim-week2`
+- Task and step: task 3, step 8 (CI and merge)
+- Branch and PR: feat/draft-orders, PR #11
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 built, checked, reviewed and the review's findings fixed (D67–D75)
+- Next: watch PR #11's CI, squash-merge it into run/week-2 when green, then start task 4 on `feat/sim-week2`
 - Next decision ID: D76
-- Updated: 2026-11-15 14:26
+- Updated: 2026-11-16 19:53
 
 ## For Yazan (look at these first)
 
+- **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
 - **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 and 4 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
@@ -77,7 +78,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 3: draft orders
 
-- Branch, PR, merge commit: feat/draft-orders
+- Branch, PR, merge commit: feat/draft-orders, PR #11
 - Plan: one commit per step, each with its tests.
   1. Tables: `purchase_orders`, `purchase_order_lines` and `receipts.po_id` (models, one migration, builders, schema tests).
   2. `app/domain/draft_lines.py`: `evaluate_draft_lines(session, business_id, pairs)`: one query finds how the touched items' draft lines differ from what is due, then plain statements add, update or remove lines (creating the draft with INSERT … ON CONFLICT). `check_draft_lines` is the same query for reconcile. It shares the "batches with stock" CTEs with alerts, so usable on-hand has one definition (D64).
@@ -95,7 +96,13 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - `reset --end-date 2026-10-31`: 49.7 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline. No draft orders yet: the simulator sets no par levels until task 4.
   - reconcile: Dar Zaatar Café OK (now including the draft-line and order-line checks).
   - `git diff --check run/week-2...HEAD`: nothing.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #11, five findings.
+  1. Fixed: pack counts could overflow. `suggested_packs` was `CEIL(...)::integer` into an int4 column, and `order_up_to` over a small `factor_to_base` can pass two billion, which would have failed every stock write for that item. Both pack columns are now bigint (the migration wasn't merged yet, so it was edited in place and both local databases re-migrated), and the owner's `qty_packs` is capped at a billion with a 400.
+  2. Fixed: `receive()` read the order's lines before taking the alerts-date lock. If the order was still a draft then, it could gain a line and be sent before the lock, and that item would not be re-evaluated when the order closed. It now locks first; a test checks the order of the statements.
+  3. Fixed: the simulator ran ANALYZE after the last day when its index was a multiple of 7, in a transaction nobody commits. It now skips the last day.
+  4. Declined: the draft-line query runs on every write (see For Yazan).
+  5. Fixed: tests for findings 1 and 2.
+  - After the fixes: 546 passed in 148.6 s, gate 1's test 43.0 s, ruff clean, reset identical to the baseline, reconcile OK.
 - Notes:
   - **Gate 1's time, looked into (the plan's 20% rule).** After the draft-line evaluation went into the writes, gate 1's test read 73.5 s and 60.5 s. A profile of the 30 days gave 64.6 s, with 8.95 s in the alerts statement (2.5 s in task 2) and 8.89 s in the draft-line statement. The cause was not the new code: `stock_test` had statistics from when it was empty, so the planner read whole tables. From a schema with no statistics the same code took 44.7 s (alerts 2.76 s, draft lines 2.83 s); after an ANALYZE of the empty database, 64.5 s; with the simulator analyzing as it goes (D75), 48.3 s from that same bad state. So the draft-line evaluation costs about 2.8 s of a 45 s run, about 6%, and task 2's alerts about the same.
   - I first tried passing the item pairs as VALUES rows instead of two arrays, so a cached plan would know how many pairs there are. With real statistics it made no difference, so it is not in the PR. The experiment is in a git stash on this machine ("values rows experiment"); the plan rules out dropping stashes, so it stays there and can be dropped by hand.
@@ -153,3 +160,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-14 about 19:05: the session stopped mid-task 3 (uncommitted: order actions and po_id on receive); nothing was lost.
 - 2026-11-15 13:38: resumed in the same session after Yazan's "continue the run" (model unchanged: Claude Fable 5.2). The working tree held the uncommitted order actions, which were finished, tested and committed (c9c3699).
 - 2026-11-15 14:26: task 3 built and checked.
+- 2026-11-15 about 16:40: the session stopped after task 3's last commit (059ffc5), before its PR.
+- 2026-11-16 19:44: resumed in the same session after Yazan's "Try again" (model unchanged). Postgres had exited (code 0) about 20 hours earlier; `docker compose up -d db` brought it back with the dev data intact.
+- 2026-11-16 19:47: PR #11 opened for task 3.
+- 2026-11-16 19:53: PR #11 reviewed (five findings, four fixed, one declined) and the fixes pushed.

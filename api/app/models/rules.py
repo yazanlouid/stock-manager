@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
@@ -196,9 +197,13 @@ class PurchaseOrderLine(Base):
     item_id: Mapped[uuid.UUID]
     # NOT NULL: a NULL would switch off the unit foreign key.
     item_unit_id: Mapped[uuid.UUID]
+    # Pack counts are bigint: the largest order_up_to over the smallest
+    # factor_to_base (both numeric(14,3)) is about 10^14 packs, past integer's
+    # two billion, and a suggestion that didn't fit would fail the stock
+    # write that computed it.
     # The rule's number: what brings the item back to order_up_to, in whole packs.
-    suggested_packs: Mapped[int]
+    suggested_packs: Mapped[int] = mapped_column(BigInteger)
     # The owner's number. On a draft, NULL means "as suggested" and 0 means
     # "don't order this"; sending fills it in, so a sent order's lines all have it.
-    qty_packs: Mapped[int | None]
+    qty_packs: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[CreatedAt]

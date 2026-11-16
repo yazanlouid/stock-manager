@@ -30,6 +30,11 @@ from app.domain.draft_lines import evaluate_draft_lines
 from app.domain.errors import DomainError
 from app.models import PurchaseOrder, PurchaseOrderLine
 
+# The most packs the owner can put on a line. Far beyond any real order,
+# and it keeps a typo from reaching the database as a number its column
+# can't hold.
+MAX_ORDER_PACKS = 1_000_000_000
+
 
 def order_packs(line: PurchaseOrderLine) -> int:
     """What a line orders: the owner's number, or the suggestion if there is none (D70)."""
@@ -52,6 +57,8 @@ def set_line_quantity(
             raise TypeError(f"qty_packs must be an int or None, not {type(qty_packs).__name__}")
         if qty_packs < 0:
             raise DomainError(f"qty_packs must not be negative, got {qty_packs}")
+        if qty_packs > MAX_ORDER_PACKS:
+            raise DomainError(f"qty_packs must be at most {MAX_ORDER_PACKS}, got {qty_packs}")
 
     _lock_business(session, business_id)
     order = _get_order(session, business_id, order_id)

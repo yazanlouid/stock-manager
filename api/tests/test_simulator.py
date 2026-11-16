@@ -305,16 +305,18 @@ def test_the_simulator_analyzes_after_the_opening_day_and_then_every_few_days(
 ):
     """D75: the planner needs statistics for the tables the run is filling.
 
-    Every 2 days here instead of every 7, so three simulated days show it.
+    Every 2 days here instead of every 7, so four simulated days show it.
     """
     monkeypatch.setattr(simulator, "ANALYZE_EVERY_DAYS", 2)
     business_id = seed(db_session, CAFE)
 
     with recorded_statements(db_session) as statements:
-        simulate(db_session, business_id, venue=CAFE, days=3, end_date=END_DATE)
+        simulate(db_session, business_id, venue=CAFE, days=4, end_date=END_DATE)
 
-    # After day 0 (the opening stock) and day 2, of days 0 to 3.
+    # After day 0 (the opening stock) and day 2, of days 0 to 4. Not after
+    # day 4: it is the last, so nothing is left running after the final commit.
     assert statements.count("ANALYZE") == 2
+    assert statements[-1] != "ANALYZE"
 
 
 def test_a_failed_day_is_rolled_back_and_earlier_days_are_kept(

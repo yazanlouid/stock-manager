@@ -28,8 +28,8 @@ Determinism. The same random seed and end date give an identical ledger:
 - each item is on one line per receipt and each delivery has its own time, so
   FEFO never falls back to its id tie-break.
 
-Statistics (D75). After day 0 and then every seventh day, the simulator runs
-ANALYZE. Postgres plans queries from table statistics, and a database filled
+Statistics (D75). After day 0 and then every seventh day, except the last day,
+the simulator runs ANALYZE. Postgres plans queries from table statistics, and a database filled
 in one go has none, or worse, has statistics from when it was empty: the
 planner then assumes empty tables and reads whole tables where it should look
 up a few rows. The domain functions run thousands of times per simulated
@@ -370,7 +370,9 @@ class _Run:
                     self._execute(event.action, occurred_at)
                 self.doing = "commit"
                 self.session.commit()
-                if index % ANALYZE_EVERY_DAYS == 0:
+                # Not after the last day: nothing follows that would use it,
+                # and it would leave a transaction open that nobody commits.
+                if index % ANALYZE_EVERY_DAYS == 0 and index < summary.days:
                     self.doing = "analyze"
                     self.session.execute(text("ANALYZE"))
             except Exception as exc:

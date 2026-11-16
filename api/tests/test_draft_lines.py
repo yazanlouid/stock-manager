@@ -331,6 +331,19 @@ def test_a_change_of_pack_unit_resets_the_owner_s_number(db_session: Session, ca
     assert (line.item_unit_id, line.suggested_packs, line.qty_packs) == (crate.id, 2, None)
 
 
+def test_a_suggestion_can_be_larger_than_a_32_bit_integer(db_session: Session, cat: Catalogue):
+    """A big order_up_to over a tiny pack: six billion packs. The columns are
+    bigint so that this is a silly suggestion and not a failed stock write."""
+    add(db_session, new_par_level(cat.location, cat.item, order_up_to=d("6000000")))
+    drop = add(db_session, new_unit(cat.item, name="drop", factor_to_base=d("0.001")))
+    cat.supplier_item.item_unit_id = drop.id
+    db_session.flush()
+
+    evaluate(db_session, cat)
+
+    assert suggested(db_session, cat) == [6_000_000_000]
+
+
 def test_evaluate_only_looks_at_the_pairs_it_is_given_in_its_own_business(
     db_session: Session, cat: Catalogue, other: Catalogue, par
 ):

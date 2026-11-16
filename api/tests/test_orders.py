@@ -149,6 +149,10 @@ def test_a_line_s_quantity_must_be_a_whole_number_of_packs_zero_or_more(
 ):
     with pytest.raises(DomainError, match="qty_packs must not be negative"):
         set_qty(db_session, cat, draft, cat.item, -1)
+    with pytest.raises(DomainError, match="qty_packs must be at most 1000000000"):
+        set_qty(db_session, cat, draft, cat.item, 1_000_000_001)
+    set_qty(db_session, cat, draft, cat.item, 1_000_000_000)
+    set_qty(db_session, cat, draft, cat.item, None)
     for not_an_int in (2.5, "3", True):
         with pytest.raises(TypeError, match="qty_packs must be an int or None"):
             set_qty(db_session, cat, draft, cat.item, not_an_int)
@@ -415,6 +419,22 @@ def test_the_count_barrier_holds_only_the_items_the_delivery_brings(
     db_session.refresh(sent)
     assert sent.status == "received"
     assert_in_line(db_session, cat)
+
+
+def test_a_delivery_against_an_order_locks_before_it_reads_the_order_s_lines(
+    db_session: Session, cat: Catalogue, draft: PurchaseOrder
+):
+    """The lines decide which items are re-evaluated when the order closes.
+    Read before the alerts-date lock, the order could still gain a line and
+    be sent in between, and that item would be missed."""
+    sent = send(db_session, cat, draft)
+
+    with recorded_statements(db_session) as statements:
+        receive_against(db_session, cat, sent, milk(cat, "6"))
+
+    lock = next(i for i, s in enumerate(statements) if "FROM businesses" in s and "FOR SHARE" in s)
+    lines_read = next(i for i, s in enumerate(statements) if "FROM purchase_order_lines" in s)
+    assert lock < lines_read
 
 
 # --- Locking --------------------------------------------------------------------
