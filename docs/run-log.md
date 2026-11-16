@@ -5,15 +5,17 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 3, step 8 (CI and merge)
-- Branch and PR: feat/draft-orders, PR #11
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 built, checked, reviewed and the review's findings fixed (D67–D75)
-- Next: watch PR #11's CI, squash-merge it into run/week-2 when green, then start task 4 on `feat/sim-week2`
-- Next decision ID: D76
-- Updated: 2026-11-16 19:53
+- Task and step: task 4, step 4 (build)
+- Branch and PR: feat/sim-week2, no PR yet
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); task 4's decisions D76–D81 and plan
+- Next: build task 4 in the commit order of its plan below
+- Next decision ID: D82 (task 4's details row)
+- Updated: 2026-11-16 20:00
 
 ## For Yazan (look at these first)
 
+- **The last day and now() (D78): I kept D41 and propose changing it.** D41 says the last simulated day runs in full, even past the current time. With night counts that would stop API writes for the counted items until tonight, so the simulator doesn't count on its last day. The older problem remains: after a reset during the day, the API can't count an item until tomorrow, because movements dated later today already exist (D51). The fix is to stop the last day at the current time, which changes D41, so it is yours to decide; the plan mentions it as brought forward from week 3.
+- **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
 - **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
@@ -26,6 +28,10 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ## Assumptions
 
+- (Task 4) The owner places orders after closing, and deliveries come the morning of the delivery day, so a lead time of one day costs no day of usage (D76). The docs give lead times in days only.
+- (Task 4) The par levels in days per kind of item, the over-portioning shares, the theft chances, the short-delivery chances and the count weekdays are my numbers, chosen so that a month of café data shows every kind of alert and a few shortfalls without looking broken (D76 to D78).
+- (Task 4) A short delivery brings 40 to 80% of each line; a late one keeps the expiry date of its planned day (D77).
+- (Task 4) Demand isn't capped by what is in stock: usage is logged as demanded, as in week 1, and runs short when a delivery is late or short. Unlogged loss only shows at a count.
 - (Task 3) A supplier delivers an order in one go: one receipt closes it, and whatever was short goes on the next draft (D71). The docs don't say whether deliveries can be split.
 - (Task 3) Orders are placed in whole packs, the owner's edits included (D70). Receipts still accept part packs, as before.
 - (Task 3) A draft's quantity on order doesn't count as "already on order" (D68): only sent orders do. The plan's note reads "open drafts plus sent orders"; with one line per item on the one open draft, counting the draft would subtract the line from itself.
@@ -78,7 +84,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 3: draft orders
 
-- Branch, PR, merge commit: feat/draft-orders, PR #11
+- Branch, PR, merge commit: feat/draft-orders, PR #11, merged into run/week-2 as 66e388c (CI 1m51s)
 - Plan: one commit per step, each with its tests.
   1. Tables: `purchase_orders`, `purchase_order_lines` and `receipts.po_id` (models, one migration, builders, schema tests).
   2. `app/domain/draft_lines.py`: `evaluate_draft_lines(session, business_id, pairs)`: one query finds how the touched items' draft lines differ from what is due, then plain statements add, update or remove lines (creating the draft with INSERT … ON CONFLICT). `check_draft_lines` is the same query for reconcile. It shares the "batches with stock" CTEs with alerts, so usable on-hand has one definition (D64).
@@ -112,9 +118,14 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/sim-week2
 - Plan:
-- Decisions:
+  1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows.
+  2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing, never on the last day. Standing orders and their carry go.
+  3. Summary and CLI: the new counters, and the tallies of alerts and orders read at the end.
+  4. Tests: seed (par levels), gate 1's test with the new path checks (D81), determinism extended to alerts, orders and counts, and the existing failure and default-end-date tests.
+  5. Docs: CLAUDE.md (commands, milestone text stays for task 7), README, `docs/schema.md` rule 10's sweep sentence, D82.
+- Decisions: D76 par levels as venue data and opening stock; D77 how the owner orders, late, short and cancelled deliveries; D78 shrinkage, weekly counts, no count on the last day; D79 the daily sweep and expired waste from alerts; D80 reversals never cross a count; D81 the summary and gate 1's test.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
@@ -164,3 +175,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-16 19:44: resumed in the same session after Yazan's "Try again" (model unchanged). Postgres had exited (code 0) about 20 hours earlier; `docker compose up -d db` brought it back with the dev data intact.
 - 2026-11-16 19:47: PR #11 opened for task 3.
 - 2026-11-16 19:53: PR #11 reviewed (five findings, four fixed, one declined) and the fixes pushed.
+- 2026-11-16 19:55: PR #11 green (CI 1m51s) and squash-merged into run/week-2 as 66e388c.
+- 2026-11-16 20:00: task 4 started on feat/sim-week2.
