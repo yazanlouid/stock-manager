@@ -1,14 +1,15 @@
-"""Domain rules 1 to 7, 9 and 10 over random sequences of stock requests (Hypothesis).
+"""Domain rules 1 to 10 over random sequences of stock requests (Hypothesis).
 
 A RuleBasedStateMachine posts random receives, usages, wastes, reversals,
-counts, retries and alert sweeps for three items: milk (batches and expiry),
-eggs (batches, no expiry) and flour (no batch tracking), with expiry dates a
-few days either side of the usage dates and times near midnight in Amman.
-Milk and flour have par levels; eggs have none.
+counts, retries, sweeps and order actions for three items: milk (batches and
+expiry), eggs (batches, no expiry) and flour (no batch tracking), with expiry
+dates a few days either side of the usage dates and times near midnight in
+Amman. Milk and flour have par levels and the same preferred supplier; eggs
+have neither.
 
 Rules 2, 3, 7 and 9 are about the moment of a write, so the rules check them
-against a snapshot taken just before it. Rules 1, 4, 5, 6 and 10 are about the
-state, so the invariants check them after every step. Every rule expects the
+against a snapshot taken just before it. Rules 1, 4, 5, 6, 8 and 10 are about
+the state, so the invariants check them after every step. Every rule expects the
 DomainError when its time breaks the count barrier (D51), and usage and waste
 respect the received_at rule (D50).
 
@@ -17,11 +18,19 @@ batches, balances and par levels say is due. The invariant works that out in
 Python from the snapshots, on its own, and compares it with the alerts table
 and with check_alerts.
 
+Rule 8 (draft orders, D67): after every step the supplier's draft holds
+exactly the lines that are due, worked out the same way: usable on-hand at or
+below the reorder point, for order_up_to minus usable on-hand minus what is on
+sent orders, rounded up to whole packs. The machine sends drafts (after
+setting some lines' quantities), cancels sent orders and receives against
+them, so what is on order keeps changing.
+
 Each example opens its own connection and transaction and rolls it back in
 teardown, because function-scoped fixtures don't reset between examples
 (CLAUDE.md). Nothing is ever deleted from the ledger.
 """
 
+import math
 import uuid
 from collections import defaultdict
 from collections.abc import Callable
@@ -44,21 +53,33 @@ from hypothesis.stateful import (
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import check_alerts, evaluate_alerts, sweep_alerts
+from app.domain.alerts import check_alerts
 from app.domain.counts import BatchCountInput, CountItemInput, count_stock
+from app.domain.draft_lines import check_draft_lines
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
+from app.domain.orders import cancel_order, send_order, set_line_quantity
+from app.domain.rules import evaluate_rules, sweep
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
 from app.models import (
     Alert,
     Batch,
     Item,
+    PurchaseOrder,
+    PurchaseOrderLine,
     ReceiptLine,
     StockBalance,
     StockCount,
     StockMovement,
 )
-from tests.builders import add, build_catalogue, new_item, new_par_level, new_unit
+from tests.builders import (
+    add,
+    build_catalogue,
+    new_item,
+    new_par_level,
+    new_supplier_item,
+    new_unit,
+)
 
 # Asia/Amman (the test business's timezone) has been UTC+3 all year since
 # October 2022. A fixed offset keeps Python's zoneinfo, which needs the tzdata
@@ -71,6 +92,8 @@ NEW_DEFAULT = UUID(int=0)
 # milk shelf life: half of it, 2 days, is milk's expiry window (D63).
 EXPIRY_WARN_DAYS = 3
 MILK_SHELF_LIFE_DAYS = 4
+# Every par level orders up to this (the builder's default), in base units.
+ORDER_UP_TO = Decimal("6000")
 
 ITEMS = st.integers(0, 2)  # milk, eggs, flour
 HOURS = st.integers(0, 23)
@@ -121,18 +144,22 @@ class StockLedgerMachine(RuleBasedStateMachine):
             (flour, add(self.db, new_unit(flour, name="bag", factor_to_base=Decimal("1000")))),
         ]
 
-        # Alerts. Milk's window comes from its shelf life; eggs and flour have
-        # none. The reorder points sit inside the quantities the rules draw,
-        # so low stock comes and goes. The par levels are added as rows, so
-        # their items are evaluated once here to bring the alerts into line:
-        # with no stock yet, both start low.
+        # Alerts and draft orders. Milk's window comes from its shelf life;
+        # eggs and flour have none. The reorder points sit inside the
+        # quantities the rules draw, so low stock comes and goes. Milk's
+        # preferred supplier is the catalogue's, and flour gets the same one,
+        # so both go on one draft. The par levels are added as rows, so their
+        # items are evaluated once here to bring the alerts and the draft
+        # into line: with no stock yet, both start low and on the draft.
         self.cat.item.shelf_life_days = MILK_SHELF_LIFE_DAYS
+        flour_bag = self.items[2][1]
+        add(self.db, new_supplier_item(self.cat.supplier, flour, flour_bag, is_preferred=True))
         self.reorder_points = {self.cat.item.id: Decimal("1000"), flour.id: Decimal("500")}
         for item, _ in self.items:
             if item.id in self.reorder_points:
                 reorder_point = self.reorder_points[item.id]
                 add(self.db, new_par_level(self.cat.location, item, reorder_point=reorder_point))
-        evaluate_alerts(
+        evaluate_rules(
             self.db,
             business_id,
             [(self.cat.location.id, item_id) for item_id in self.reorder_points],
@@ -226,8 +253,14 @@ class StockLedgerMachine(RuleBasedStateMachine):
             max_size=3,
         ),
         hour=HOURS,
+        data=st.data(),
     )
-    def receive_goods(self, lines: list[tuple[int, int, Decimal, int]], hour: int) -> None:
+    def receive_goods(
+        self, lines: list[tuple[int, int, Decimal, int]], hour: int, data: st.DataObject
+    ) -> None:
+        # Sometimes the delivery is against a sent order, whatever it brings (D71).
+        sent = self.orders_with("sent")
+        po_id = data.draw(st.sampled_from([None, *sent])) if sent else None
         inputs = []
         received_qty: dict[UUID, Decimal] = defaultdict(Decimal)
         for index, quarters, pack_price, expiry_offset in lines:
@@ -254,12 +287,17 @@ class StockLedgerMachine(RuleBasedStateMachine):
             lines=inputs,
             client_id=client_id,
             source="simulator",
+            po_id=po_id,
         )
         if any(self.barred(item_id, self.at(hour)) for item_id in received_qty):
             self.expect_refused(call, "was counted at")
+            assert po_id is None or po_id in self.orders_with("sent")
             return
         result = call()
         self.remember("receive", client_id, call, result.movements)
+        if po_id is not None:
+            assert result.receipt.po_id == po_id
+            assert po_id in self.orders_with("received")
 
         # Rule 7: a receive carries its line's cost, and both halves of a settle
         # pair carry the cost of the receive they follow.
@@ -591,8 +629,85 @@ class StockLedgerMachine(RuleBasedStateMachine):
             assert m.qty_delta == line.counted_qty - line.expected_qty
         assert all(after[b].unit_cost == s.unit_cost for b, s in before.items())
 
+    def orders_with(self, status: str) -> list[UUID]:
+        """The ids of the business's orders in that status, oldest first."""
+        return list(
+            self.db.scalars(
+                select(PurchaseOrder.id)
+                .where(
+                    PurchaseOrder.business_id == self.business_id, PurchaseOrder.status == status
+                )
+                .order_by(PurchaseOrder.id)
+            )
+        )
+
+    def draft_lines(self) -> list[PurchaseOrderLine]:
+        """The lines of the supplier's draft, by item."""
+        return list(
+            self.db.scalars(
+                select(PurchaseOrderLine)
+                .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.po_id)
+                .where(
+                    PurchaseOrder.business_id == self.business_id,
+                    PurchaseOrder.status == "draft",
+                )
+                .order_by(PurchaseOrderLine.item_id)
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    @precondition(lambda self: self.draft_lines())
+    @rule(hour=HOURS, data=st.data())
+    def send_draft(self, hour: int, data: st.DataObject) -> None:
+        """The owner sets a number on some lines (fewer, more or none), then sends.
+
+        A line left alone orders what it already said: the number from an
+        earlier attempt that was refused, or else the suggestion.
+        """
+        lines = self.draft_lines()
+        order_id = lines[0].po_id
+        ordered: dict[UUID, int] = {}
+        for line in lines:
+            qty = data.draw(st.one_of(st.none(), st.integers(0, 8)))
+            if qty is None:
+                qty = line.suggested_packs if line.qty_packs is None else line.qty_packs
+            else:
+                set_line_quantity(
+                    self.db, self.business_id, order_id=order_id, line_id=line.id, qty_packs=qty
+                )
+            ordered[line.item_id] = qty
+
+        send = partial(
+            send_order, self.db, self.business_id, order_id=order_id, sent_at=self.at(hour)
+        )
+        if not any(ordered.values()):
+            with pytest.raises(DomainError, match="nothing to order"):
+                send()
+            assert order_id in self.orders_with("draft")
+            return
+        send()
+
+        # D70: every line of the sent order carries what it orders, and the
+        # lines set to 0 are gone.
+        assert order_id in self.orders_with("sent")
+        sent_lines = dict(
+            self.db.execute(
+                select(PurchaseOrderLine.item_id, PurchaseOrderLine.qty_packs).where(
+                    PurchaseOrderLine.po_id == order_id
+                )
+            ).all()
+        )
+        assert sent_lines == {item_id: qty for item_id, qty in ordered.items() if qty > 0}
+
+    @precondition(lambda self: self.orders_with("sent"))
+    @rule(hour=HOURS, data=st.data())
+    def cancel_sent_order(self, hour: int, data: st.DataObject) -> None:
+        order_id = data.draw(st.sampled_from(self.orders_with("sent")))
+        cancel_order(self.db, self.business_id, order_id=order_id, cancelled_at=self.at(hour))
+        assert order_id in self.orders_with("cancelled")
+
     @rule(hour=HOURS)
-    def sweep(self, hour: int) -> None:
+    def sweep_rules(self, hour: int) -> None:
         """Sweep the alerts as of some hour of the current day.
 
         Late hours fall on the next day in Amman, so a later sweep earlier in
@@ -602,9 +717,9 @@ class StockLedgerMachine(RuleBasedStateMachine):
         local_date = (as_of + AMMAN_OFFSET).date()
         if self.swept_on is not None and local_date < self.swept_on:
             with pytest.raises(DomainError, match="already swept"):
-                sweep_alerts(self.db, self.business_id, as_of)
+                sweep(self.db, self.business_id, as_of)
             return
-        sweep_alerts(self.db, self.business_id, as_of)
+        sweep(self.db, self.business_id, as_of)
         self.swept_on = local_date
 
     @precondition(lambda self: self.requests)
@@ -707,8 +822,8 @@ class StockLedgerMachine(RuleBasedStateMachine):
             return EXPIRY_WARN_DAYS
         return min(EXPIRY_WARN_DAYS, item.shelf_life_days // 2)
 
-    def alerts_due(self) -> set[tuple[str, UUID, UUID | None]]:
-        """What should be open, as (type, item_id, batch_id), from the snapshots.
+    def alerts_due(self, stock: dict[UUID, list[BatchSnapshot]]) -> set[tuple]:
+        """What should be open, as (type, item_id, batch_id), from each item's batches.
 
         Written out here rather than reusing the domain's query, so the
         invariant checks the rules themselves, not only that the writes and a
@@ -716,15 +831,11 @@ class StockLedgerMachine(RuleBasedStateMachine):
         """
         due: set[tuple[str, UUID, UUID | None]] = set()
         for item, _ in self.items:
-            usable = Decimal(0)
-            for snapshot in self.snapshots(item.id).values():
-                batch = snapshot.batch
+            for batch in stock[item.id]:
                 # Dates are judged against the alerts date; before the first
                 # sweep nothing has expired or is expiring.
                 dated = self.swept_on is not None and batch.expires_on is not None
                 expired = dated and batch.expires_on < self.swept_on
-                if not expired:
-                    usable += batch.on_hand
                 if batch.is_default and batch.on_hand < 0:
                     due.add(("negative_stock", item.id, batch.id))
                 if batch.on_hand > 0 and expired:
@@ -733,21 +844,73 @@ class StockLedgerMachine(RuleBasedStateMachine):
                     if (batch.expires_on - self.swept_on).days <= self.expiry_window(item):
                         due.add(("expiring", item.id, batch.id))
             reorder_point = self.reorder_points.get(item.id)
-            if reorder_point is not None and usable <= reorder_point:
+            if reorder_point is not None and self.usable_on_hand(stock[item.id]) <= reorder_point:
                 due.add(("low_stock", item.id, None))
         return due
 
+    def usable_on_hand(self, batches: list[BatchSnapshot]) -> Decimal:
+        """The sum of an item's batches that haven't expired as of the alerts
+        date, a negative default batch included (D64)."""
+        usable = Decimal(0)
+        for batch in batches:
+            dated = self.swept_on is not None and batch.expires_on is not None
+            if not (dated and batch.expires_on < self.swept_on):
+                usable += batch.on_hand
+        return usable
+
+    def draft_lines_due(self, stock: dict[UUID, list[BatchSnapshot]]) -> list[tuple[UUID, int]]:
+        """What the supplier's draft should hold, as (item_id, suggested_packs).
+
+        Written out here, like alerts_due. On order is read from the sent
+        orders' lines, which send_draft checked when it wrote them.
+        """
+        factors = {item.id: unit.factor_to_base for item, unit in self.items}
+        on_order: dict[UUID, Decimal] = defaultdict(Decimal)
+        sent_lines = self.db.execute(
+            select(PurchaseOrderLine.item_id, PurchaseOrderLine.qty_packs)
+            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.po_id)
+            .where(PurchaseOrder.business_id == self.business_id, PurchaseOrder.status == "sent")
+        )
+        for item_id, qty_packs in sent_lines:
+            on_order[item_id] += qty_packs * factors[item_id]
+
+        due = []
+        for item, _ in self.items:
+            reorder_point = self.reorder_points.get(item.id)
+            if reorder_point is None:
+                continue
+            usable = self.usable_on_hand(stock[item.id])
+            needed = ORDER_UP_TO - usable - on_order[item.id]
+            if usable <= reorder_point and needed > 0:
+                due.append((item.id, math.ceil(needed / factors[item.id])))
+        return due
+
     @invariant()
-    def open_alerts_are_exactly_what_is_due(self) -> None:
-        """Rule 10 (D59), against the Python evaluation and against check_alerts."""
+    def alerts_and_draft_lines_are_exactly_what_is_due(self) -> None:
+        """Rules 10 (D59) and 8 (D67), against the Python evaluations above and
+        against check_alerts and check_draft_lines.
+
+        One invariant for both, so each item's batches are read once per step.
+        """
+        stock = {
+            item.id: [snapshot.batch for snapshot in self.snapshots(item.id).values()]
+            for item, _ in self.items
+        }
+
         open_alerts = self.db.execute(
             select(Alert.type, Alert.item_id, Alert.batch_id).where(
                 Alert.business_id == self.business_id, Alert.status == "open"
             )
         ).all()
         assert len(open_alerts) == len(set(open_alerts))
-        assert {tuple(row) for row in open_alerts} == self.alerts_due()
+        assert {tuple(row) for row in open_alerts} == self.alerts_due(stock)
         assert check_alerts(self.db, self.business_id) == []
+
+        lines = [(line.item_id, line.suggested_packs) for line in self.draft_lines()]
+        # Compared as sorted lists, so a duplicate line would show.
+        assert sorted(lines) == sorted(self.draft_lines_due(stock))
+        assert len(self.orders_with("draft")) <= 1  # one supplier, one location
+        assert check_draft_lines(self.db, self.business_id) == []
 
 
 def test_ledger_rules_hold_for_random_requests(engine: Engine) -> None:

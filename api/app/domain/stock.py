@@ -10,9 +10,10 @@ the API request, the simulator or the test owns the transaction. Each one
   the movements already written and returns them without writing anything;
 - updates each touched batch's stock_balances row in the same transaction, so
   qty_on_hand is always the sum of the batch's movements (domain rule 1);
-- ends by re-evaluating the alerts of the items it wrote to (evaluate_alerts
-  in alerts.py), still holding their default-batch locks, so the open alerts
-  always match the stock (D59). A replay writes nothing and evaluates nothing.
+- ends by re-evaluating the alerts and draft order lines of the items it
+  wrote to (evaluate_rules in rules.py), still holding their default-batch
+  locks, so both always match the stock (D59, D67). A replay writes nothing
+  and evaluates nothing.
 """
 
 from collections.abc import Iterable, Sequence
@@ -24,15 +25,18 @@ from uuid import UUID
 from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.orm import Session
 
-from app.domain.alerts import evaluate_alerts, lock_alerts_date
+from app.domain.alerts import lock_alerts_date
 from app.domain.checks import check_money, check_quantity, check_timestamp
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
+from app.domain.rules import evaluate_rules
 from app.models import (
     Batch,
     Item,
     ItemUnit,
     Location,
+    PurchaseOrder,
+    PurchaseOrderLine,
     Receipt,
     ReceiptLine,
     StockBalance,
@@ -549,6 +553,7 @@ def receive(
     client_id: UUID,
     source: str,
     user_id: UUID | None = None,
+    po_id: UUID | None = None,
 ) -> ReceiveResult:
     """Record a delivery: a receipt, its lines, and one receive movement per line.
 
@@ -557,6 +562,13 @@ def receive(
     batch-tracked item's default batch is negative, each line settles it right
     after its receive (domain rule 4): a settle pair moves min(qty, shortfall)
     out of the new batch and into the default batch, at the new batch's cost.
+
+    With po_id, the delivery is against a sent order from this supplier at
+    this location, and closes it (D71): the order becomes received at
+    received_at. The lines are what arrived, whatever was ordered. An item
+    that was ordered and came short, or didn't come, is no longer on order
+    once the order is closed, so the order's items are re-evaluated with
+    the receipt's and go onto the supplier's next draft if they are still low.
     """
     check_timestamp(received_at, "received_at")
     _check_source(source)
@@ -589,11 +601,21 @@ def receive(
         if duplicate is not None:
             raise DomainError(f"invoice {invoice_ref} from this supplier was already received")
     plans = [_plan_line(session, business_id, line) for line in lines]
+    received_pairs = [(location_id, plan.item.id) for plan in plans]
+    ordered_pairs: list[tuple[UUID, UUID]] = []
+    if po_id is not None:
+        ordered_pairs = _ordered_pairs(session, business_id, po_id, location_id, supplier_id)
 
     # Every item on the receipt gets its default batch, even batch-tracked ones:
     # it is the item's lock (see Locking above), and settling needs its balance.
-    defaults = _lock_defaults(session, business_id, ((location_id, p.item.id) for p in plans))
-    _check_count_barrier(session, business_id, dict.fromkeys(defaults, received_at))
+    # The items of the order are locked too, because closing the order changes
+    # what is on order for them, so their draft lines are re-evaluated below.
+    defaults = _lock_defaults(session, business_id, [*received_pairs, *ordered_pairs])
+    # Only what the receipt writes stock for is held to the count barrier.
+    _check_count_barrier(session, business_id, dict.fromkeys(received_pairs, received_at))
+    # The last check, and before anything is written, like every other refusal.
+    if po_id is not None:
+        _close_order(session, business_id, po_id, received_at)
 
     receipt = Receipt(
         business_id=business_id,
@@ -601,6 +623,7 @@ def receive(
         supplier_id=supplier_id,
         received_at=received_at,
         invoice_ref=invoice_ref,
+        po_id=po_id,
     )
     session.add(receipt)
     session.flush()
@@ -644,8 +667,66 @@ def receive(
             ledger.post(batch, -settle_qty, "settle", plan.unit_cost, received_at)
             ledger.post(default, settle_qty, "settle", plan.unit_cost, received_at)
 
-    evaluate_alerts(session, business_id, defaults, received_at)
+    evaluate_rules(session, business_id, defaults, received_at)
     return ReceiveResult(receipt, tuple(ledger.movements), replayed=False)
+
+
+def _ordered_pairs(
+    session: Session, business_id: UUID, po_id: UUID, location_id: UUID, supplier_id: UUID
+) -> list[tuple[UUID, UUID]]:
+    """Check the order a receipt names; return the (location_id, item_id) of its lines.
+
+    The alerts-date lock comes first. It keeps the order actions out, and
+    only they and the stock writes change an order's lines, so the lines read
+    here are the ones the order has when it is closed. Read before the lock,
+    a draft could gain a line and be sent in between, and that item would be
+    left out of the re-evaluation. _lock_defaults takes the same lock again
+    afterwards, which costs a statement and changes nothing.
+
+    The order's supplier and location never change (a composite foreign key
+    on receipts enforces them too). Its status is checked when it is closed.
+    """
+    lock_alerts_date(session, business_id)
+    order = _get(session, PurchaseOrder, business_id, po_id, "order")
+    if order.supplier_id != supplier_id:
+        raise DomainError(f"order {po_id} is for another supplier")
+    if order.location_id != location_id:
+        raise DomainError(f"order {po_id} is for another location")
+    item_ids = session.scalars(
+        select(PurchaseOrderLine.item_id).where(
+            PurchaseOrderLine.business_id == business_id, PurchaseOrderLine.po_id == po_id
+        )
+    )
+    return [(location_id, item_id) for item_id in item_ids]
+
+
+def _close_order(session: Session, business_id: UUID, po_id: UUID, received_at: datetime) -> None:
+    """Mark the sent order as received; refuse any other status.
+
+    The UPDATE's WHERE is the check, so checking and closing are one step. It
+    runs under the alerts-date lock that _lock_defaults took, which keeps the
+    order actions (send, cancel) out, and a second receipt against the same
+    order waits on this row, then finds it received and is refused. Unique
+    receipts.po_id is the backstop.
+    """
+    closed = session.execute(
+        update(PurchaseOrder)
+        .where(
+            PurchaseOrder.business_id == business_id,
+            PurchaseOrder.id == po_id,
+            PurchaseOrder.status == "sent",
+        )
+        .values(status="received", received_at=received_at)
+        # Refresh any PurchaseOrder this session already holds.
+        .execution_options(synchronize_session="fetch")
+    )
+    if closed.rowcount != 1:
+        status = session.scalar(
+            select(PurchaseOrder.status).where(
+                PurchaseOrder.business_id == business_id, PurchaseOrder.id == po_id
+            )
+        )
+        raise DomainError(f"order {po_id} is {status}, not sent, so nothing can be received on it")
 
 
 # --- Use ------------------------------------------------------------------------
@@ -724,7 +805,7 @@ def use(
     for allocation in result.allocations:
         batch = by_id[allocation.batch_id]
         ledger.post(batch, -allocation.quantity, "usage", batch.unit_cost, occurred_at)
-    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
+    evaluate_rules(session, business_id, [(location_id, item_id)], occurred_at)
     return UseResult(tuple(ledger.movements), result.shortfall, replayed=False)
 
 
@@ -802,7 +883,7 @@ def waste(
 
     ledger = _Ledger(session, business_id, client_id, source, user_id)
     ledger.post(batch, -quantity, "waste", batch.unit_cost, occurred_at, reason=reason)
-    evaluate_alerts(session, business_id, [(location_id, item_id)], occurred_at)
+    evaluate_rules(session, business_id, [(location_id, item_id)], occurred_at)
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 
@@ -893,7 +974,7 @@ def reverse(
         )
     # The reversal's business time is its originals' occurred_at (one request,
     # so one time; max() only avoids relying on that).
-    evaluate_alerts(session, business_id, defaults, max(m.occurred_at for m in originals))
+    evaluate_rules(session, business_id, defaults, max(m.occurred_at for m in originals))
     return MovementsResult(tuple(ledger.movements), replayed=False)
 
 

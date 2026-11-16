@@ -28,6 +28,13 @@ Determinism. The same random seed and end date give an identical ledger:
 - each item is on one line per receipt and each delivery has its own time, so
   FEFO never falls back to its id tie-break.
 
+Statistics (D75). After day 0 and then every seventh day, except the last day,
+the simulator runs ANALYZE. Postgres plans queries from table statistics, and a database filled
+in one go has none, or worse, has statistics from when it was empty: the
+planner then assumes empty tables and reads whole tables where it should look
+up a few rows. The domain functions run thousands of times per simulated
+month, so the run is much faster once the statistics are real.
+
 Timezones. Dates are the venue's local dates. Local times become timestamptz
 in Postgres, in one query per day, as use() does for usage dates (D32).
 """
@@ -68,6 +75,8 @@ EXPIRED_WASTE_BY_DAY = 3
 # Usage entries end this long before closing, so a mistake's correction still
 # falls on the same day.
 LAST_ENTRY_BEFORE_CLOSE = timedelta(minutes=30)
+# ANALYZE after day 0 (the opening stock) and then every this many days (D75).
+ANALYZE_EVERY_DAYS = 7
 
 
 class SimulationError(Exception):
@@ -361,6 +370,11 @@ class _Run:
                     self._execute(event.action, occurred_at)
                 self.doing = "commit"
                 self.session.commit()
+                # Not after the last day: nothing follows that would use it,
+                # and it would leave a transaction open that nobody commits.
+                if index % ANALYZE_EVERY_DAYS == 0 and index < summary.days:
+                    self.doing = "analyze"
+                    self.session.execute(text("ANALYZE"))
             except Exception as exc:
                 self.session.rollback()
                 raise SimulationError(f"day {index} ({day}): {self.doing}: {exc}") from exc

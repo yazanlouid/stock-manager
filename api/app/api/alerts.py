@@ -15,7 +15,7 @@ from sqlalchemy import and_, select
 
 from app.api.deps import CurrentBusiness, DbSession, Now
 from app.api.schemas import AlertBatchOut, AlertOut
-from app.domain.alerts import sweep_alerts_if_due
+from app.domain.rules import sweep_if_due
 from app.models import Alert, Batch, Item, Location, StockBalance
 
 router = APIRouter(tags=["alerts"])
@@ -45,7 +45,7 @@ def get_alerts(
     list is empty.
     """
     business_id = business.id
-    sweep_alerts_if_due(db, business_id, now)
+    sweep_if_due(db, business_id, now)
 
     alerts = (
         select(

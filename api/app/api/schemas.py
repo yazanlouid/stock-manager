@@ -23,7 +23,14 @@ from decimal import Context, Decimal, Inexact, InvalidOperation
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, PlainSerializer
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    PlainSerializer,
+    StrictInt,
+)
 
 # Traps instead of rounding: Inexact when a non-zero digit would be dropped,
 # InvalidOperation when the result needs more digits than the precision.
@@ -78,6 +85,8 @@ class ReceiptIn(RequestModel):
     supplier_id: UUID
     received_at: AwareDatetime
     invoice_ref: str | None = None
+    # The sent order this delivery is against, if any; the receipt closes it (D71).
+    po_id: UUID | None = None
     lines: list[ReceiptLineIn]
 
 
@@ -107,6 +116,13 @@ class ReversalIn(RequestModel):
     client_id: UUID
     # The client_id of the usage or waste request to reverse (D34).
     original_client_id: UUID
+
+
+class OrderLineIn(RequestModel):
+    # Whole packs, zero or more; null means "as suggested". Required, so a
+    # body that leaves it out isn't read as null. A JSON integer only: "4",
+    # 4.0 and true are refused.
+    qty_packs: StrictInt | None
 
 
 class CountBatchIn(RequestModel):
@@ -161,6 +177,8 @@ class ReceiptOut(ResponseModel):
     supplier_id: UUID
     received_at: Timestamp
     invoice_ref: str | None
+    # The order this delivery closed, if it was against one.
+    po_id: UUID | None
     created_at: Timestamp
 
 
@@ -283,6 +301,54 @@ class AlertOut(BaseModel):
     base_unit: str
     # Null for low_stock, which is about the item at the location.
     batch: AlertBatchOut | None
+
+
+# --- Orders --------------------------------------------------------------------
+
+
+class OrderLineOut(BaseModel):
+    """One item on an order, in whole packs of one of its units."""
+
+    id: UUID
+    item_id: UUID
+    sku: str
+    item_name: str
+    base_unit: str
+    item_unit_id: UUID
+    unit_name: str
+    # Base units in one pack.
+    factor_to_base: Quantity
+    # The rule's number: what brings the item back to order_up_to.
+    suggested_packs: int
+    # The owner's number; null on a draft line means "as suggested". On an
+    # order that was sent it is always set.
+    qty_packs: int | None
+    # What the line orders: qty_packs, or suggested_packs when that is null.
+    order_packs: int
+    # What the supplier charges for one pack now; null if they no longer
+    # list the item in this unit.
+    pack_price: Money | None
+
+
+class OrderOut(BaseModel):
+    """A purchase order: a draft the par-level rule keeps, or one that was sent."""
+
+    id: UUID
+    # draft, sent, received or cancelled.
+    status: str
+    location_id: UUID
+    location_name: str
+    supplier_id: UUID
+    supplier_name: str
+    # Business time; each is null until the order reaches that status.
+    sent_at: Timestamp | None
+    received_at: Timestamp | None
+    cancelled_at: Timestamp | None
+    created_at: Timestamp
+    # The delivery that closed a received order.
+    receipt_id: UUID | None
+    # By item SKU.
+    lines: list[OrderLineOut]
 
 
 # --- GET /catalogue ------------------------------------------------------------

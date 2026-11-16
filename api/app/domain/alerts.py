@@ -3,11 +3,12 @@
 Alerts are a projection, like stock_balances: the open alerts of an item at a
 location always equal what its batches, balances and par level say is due.
 Whatever changes those re-evaluates the item in the same transaction:
-- every stock write (stock.py and counts.py) calls evaluate_alerts for the
-  items it touched, after its movements;
-- sweep_alerts moves the business's alerts date and re-evaluates every item.
-Nothing else writes the alerts table. Like the other domain functions, these
-work on the caller's Session and never commit (hard rule 3).
+- every stock write (stock.py and counts.py) re-evaluates the items it
+  touched, after its movements;
+- the sweep moves the business's alerts date and re-evaluates every item.
+Both go through rules.py, which evaluates the draft order lines alongside
+(draft_lines.py). Nothing else writes the alerts table. Like the other domain
+functions, these work on the caller's Session and never commit (hard rule 3).
 
 What is due (the _DUE query below), per item and location:
 - negative_stock: the item's default batch is below zero (domain rule 4);
@@ -80,18 +81,21 @@ class AlertDifference:
 
 # --- What is due ----------------------------------------------------------------
 
-# Three CTEs shared by the evaluation and the check. They take the bind
-# parameters :business_id, :location_ids and :item_ids; the two arrays are
-# the (location, item) pairs to look at, position by position.
+# The CTEs below take the bind parameters :business_id, :location_ids and
+# :item_ids; the two arrays are the (location, item) pairs to look at,
+# position by position (pair_params builds them).
 #
+# STOCK_CTES is shared with draft_lines.py, so alerts and draft orders use one
+# definition of usable on-hand (D64):
 # stock: every batch of those items that holds stock, with what the rules need.
 #   expired and days_left are NULL for a batch with no expiry date and for a
-#   business that has never been swept; every use below treats NULL as
+#   business that has never been swept; every use treats NULL as
 #   "not expired, not expiring".
 #   LEAST skips a NULL, so an item with no shelf life gets expiry_warn_days;
 #   shelf_life_days / 2 is integer division.
-# due: one row per alert that should be open.
-_DUE = """
+# usable: per pair, the sum of its batches that haven't expired, the default
+#   batch included even when negative; 0 for an item with no stock at all.
+STOCK_CTES = """
     touched AS (
         SELECT location_id, item_id
         FROM unnest(CAST(:location_ids AS uuid[]), CAST(:item_ids AS uuid[]))
@@ -116,6 +120,18 @@ _DUE = """
         JOIN businesses AS biz ON biz.id = b.business_id
         WHERE s.qty_on_hand <> 0
     ),
+    usable AS (
+        SELECT t.location_id,
+               t.item_id,
+               COALESCE(sum(st.qty_on_hand) FILTER (WHERE st.expired IS NOT TRUE), 0) AS qty
+        FROM touched AS t
+        LEFT JOIN stock AS st ON st.location_id = t.location_id AND st.item_id = t.item_id
+        GROUP BY t.location_id, t.item_id
+    )
+"""
+
+# due: one row per alert that should be open.
+_DUE = f"""{STOCK_CTES},
     due AS (
         SELECT 'negative_stock' AS type, location_id, item_id, batch_id
         FROM stock
@@ -129,23 +145,14 @@ _DUE = """
         FROM stock
         WHERE qty_on_hand > 0 AND NOT expired AND days_left <= warn_days
         UNION ALL
-        -- Usable on-hand: every batch that hasn't expired, the default batch
-        -- included even when negative. An item with no stock at all has 0.
         SELECT 'low_stock', p.location_id, p.item_id, NULL
-        FROM touched AS t
+        FROM usable AS u
         JOIN par_levels AS p
           ON p.business_id = :business_id
-         AND p.location_id = t.location_id
-         AND p.item_id = t.item_id
+         AND p.location_id = u.location_id
+         AND p.item_id = u.item_id
         JOIN items AS i ON i.business_id = p.business_id AND i.id = p.item_id
-        WHERE i.is_active
-          AND p.reorder_point >= COALESCE(
-                (SELECT sum(st.qty_on_hand)
-                 FROM stock AS st
-                 WHERE st.location_id = p.location_id
-                   AND st.item_id = p.item_id
-                   AND st.expired IS NOT TRUE),
-                0)
+        WHERE i.is_active AND u.qty <= p.reorder_point
     )
 """
 
@@ -230,7 +237,8 @@ _CHECK = text(
 type Pair = tuple[UUID, UUID]  # (location_id, item_id)
 
 
-def _pair_params(business_id: UUID, pairs: list[Pair]) -> dict:
+def pair_params(business_id: UUID, pairs: list[Pair]) -> dict:
+    """The bind parameters the CTEs above take."""
     return {
         "business_id": business_id,
         "location_ids": [location_id for location_id, _ in pairs],
@@ -292,7 +300,7 @@ def evaluate_alerts(
     pairs = sorted(set(pairs))
     if not pairs:
         return []
-    rows = session.execute(_EVALUATE, _pair_params(business_id, pairs) | {"at": at})
+    rows = session.execute(_EVALUATE, pair_params(business_id, pairs) | {"at": at})
     return [
         AlertChange(change, AlertKey(type, location_id, item_id, batch_id))
         for change, type, location_id, item_id, batch_id in rows
@@ -303,7 +311,10 @@ def evaluate_alerts(
 
 
 def sweep_alerts(session: Session, business_id: UUID, as_of: datetime) -> list[AlertChange]:
-    """Move the alerts date to as_of's local date and re-evaluate every item.
+    """Move the alerts date to as_of's local date and re-evaluate every item's alerts.
+
+    Call rules.sweep, not this: it also re-evaluates the draft order lines,
+    which depend on the same date.
 
     This is what turns a batch from fine to expiring to expired as days pass,
     and makes an item low when the stock it relied on expires. as_of is
@@ -353,10 +364,12 @@ def _sweep_refusal(session: Session, business_id: UUID) -> str:
     return f"alerts were already swept as of {row.alerts_swept_on}, and the date can't move back"
 
 
-def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> None:
-    """Sweep as of now if its local date is past the alerts date (D62).
+def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> bool:
+    """Sweep the alerts as of now if its local date is past the alerts date (D62).
 
-    GET /alerts calls this, so the list is current whenever someone reads it.
+    Returns whether it swept, so rules.sweep_if_due, the one caller, can
+    re-evaluate the draft lines too.
+
     The check is a plain read: on most reads the date hasn't moved and nothing
     is locked. Two reads that both find a sweep due take turns at the UPDATE.
     On the same date the second re-evaluates and changes nothing. If the
@@ -377,9 +390,11 @@ def sweep_alerts_if_due(session: Session, business_id: UUID, now: datetime) -> N
     if row is None:
         raise DomainError(f"business {business_id} not found")
     if row.alerts_swept_on is not None and row.alerts_swept_on >= row.today:
-        return
-    if _move_alerts_date(session, business_id, now) is not None:
-        evaluate_alerts(session, business_id, _all_pairs(session, business_id), now)
+        return False
+    if _move_alerts_date(session, business_id, now) is None:
+        return False
+    evaluate_alerts(session, business_id, _all_pairs(session, business_id), now)
+    return True
 
 
 # --- Check ----------------------------------------------------------------------
@@ -394,7 +409,7 @@ def check_alerts(session: Session, business_id: UUID) -> list[AlertDifference]:
     pairs = _all_pairs(session, business_id)
     if not pairs:
         return []  # unnest of nothing would find nothing; skip the query
-    rows = session.execute(_CHECK, _pair_params(business_id, pairs))
+    rows = session.execute(_CHECK, pair_params(business_id, pairs))
     return [
         AlertDifference(kind, AlertKey(type, location_id, item_id, batch_id))
         for kind, type, location_id, item_id, batch_id in rows
