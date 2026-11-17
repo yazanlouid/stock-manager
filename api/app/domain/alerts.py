@@ -16,7 +16,9 @@ What is due (the _DUE query below), per item and location:
 - expiring: a batch with stock that hasn't expired and expires within the
   item's window, min(expiry_warn_days, shelf_life_days // 2) days (D63);
 - low_stock: an active item with a par level whose usable on-hand, the sum
-  of its batches that haven't expired, is at or below reorder_point (D64).
+  of its batches that haven't expired, is at or below low_stock_level (D64,
+  D83). That is at or below reorder_point, which only triggers draft lines,
+  so an item in its normal ordering cycle isn't short.
 
 The alerts date (D61). "Expired" needs a date, and the open alerts can only be
 checked against a fresh evaluation if every item was judged by the same one.
@@ -152,7 +154,7 @@ _DUE = f"""{STOCK_CTES},
          AND p.location_id = u.location_id
          AND p.item_id = u.item_id
         JOIN items AS i ON i.business_id = p.business_id AND i.id = p.item_id
-        WHERE i.is_active AND u.qty <= p.reorder_point
+        WHERE i.is_active AND u.qty <= p.low_stock_level
     )
 """
 
