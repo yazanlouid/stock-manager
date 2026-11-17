@@ -40,7 +40,7 @@ From `api/`:
 - Tests: `uv run pytest`
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format .` (CI runs `uv run ruff format --check .`)
-- Fresh demo data (asks for confirmation, recreates the schema, then seeds and simulates 30 days): `uv run python -m app.cli reset`
+- Fresh demo data (asks for confirmation, recreates the schema, then seeds and simulates the 30 days up to now): `uv run python -m app.cli reset`
 - Seed and simulate into an empty, migrated database: `uv run python -m app.cli simulate`
 - Check every business's ledger: `uv run python -m app.cli reconcile`
 - Try the API: run it, copy a business id from `reconcile`'s output, then send it as the `X-Business-Id` header from http://localhost:8000/docs
