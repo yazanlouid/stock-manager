@@ -152,12 +152,18 @@ def format_summary(summary: SimulationSummary) -> list[str]:
     return [
         f"Days: {summary.days}, {summary.first_day} to {summary.end_date}"
         f" (opening stock on {summary.opening_day}), random seed {summary.random_seed}",
-        f"Receipts: {summary.receipts} ({summary.late_deliveries} late)",
+        f"Orders: sent {summary.orders_sent}, received {summary.orders_received},"
+        f" cancelled {summary.orders_cancelled}; now {counts(summary.orders_by_status)}",
+        f"Receipts: {summary.receipts} ({summary.late_deliveries} late,"
+        f" {summary.short_deliveries} short)",
         f"Movements: {counts(summary.movements_by_type)}",
         f"Waste by reason: {counts(summary.waste_by_reason)}",
         f"Shortfalls: {summary.shortfalls}" + (f" ({shortfalls})" if shortfalls else ""),
         f"Settle pairs: {summary.settle_pairs}",
         f"Reversals: {summary.reversals}",
+        f"Counts: {summary.counts} ({summary.count_variances} lines with a variance)",
+        f"Alerts raised: {counts(summary.alerts_raised)}",
+        f"Alerts open: {counts(summary.alerts_open)}",
     ]
 
 
