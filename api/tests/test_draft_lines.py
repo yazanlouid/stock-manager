@@ -31,7 +31,7 @@ from tests.builders import (
     new_supplier_item,
     new_unit,
 )
-from tests.test_alerts import batch_with, d, default_with, nov, set_on_hand
+from tests.test_alerts import batch_with, d, default_with, nov, open_alerts, set_on_hand
 from tests.test_counts import do_count, tracked
 from tests.test_stock import assert_reconciled, do_receive, do_use, milk
 
@@ -83,7 +83,7 @@ def sent_order(db: Session, cat: Catalogue, packs: int, **overrides) -> Purchase
 
 @pytest.fixture
 def par(db_session: Session, cat: Catalogue):
-    """Milk: reorder at 2000 ml, order up to 6000 ml."""
+    """Milk: low stock at 1000 ml, reorder at 2000 ml, order up to 6000 ml."""
     return add(db_session, new_par_level(cat.location, cat.item))
 
 
@@ -409,6 +409,27 @@ def test_usage_puts_an_item_on_the_draft_and_a_receipt_takes_it_off(
 
     do_receive(db_session, cat, milk(cat, "6"), received_at=nov(11))
     assert suggested(db_session, cat) == []
+    assert_in_line(db_session, cat)
+
+
+def test_between_the_low_stock_level_and_the_reorder_point_milk_is_on_the_draft_but_not_low(
+    db_session: Session, cat: Catalogue, par
+):
+    # The par fixture: low stock at 1000 ml, reorder at 2000 ml (D83).
+    do_receive(db_session, cat, milk(cat, "5", expires_day=20), received_at=nov(9))
+
+    do_use(db_session, cat, cat.item, "3000", occurred_at=nov(10, 8))
+    assert suggested(db_session, cat) == [4]  # 2000 ml left: at the reorder point
+    assert open_alerts(db_session, cat) == set()  # but not short
+    do_use(db_session, cat, cat.item, "999", occurred_at=nov(10, 9))
+    assert open_alerts(db_session, cat) == set()  # 1001 ml left
+    do_use(db_session, cat, cat.item, "1", occurred_at=nov(10, 10))
+    assert suggested(db_session, cat) == [5]
+    assert open_alerts(db_session, cat) == {("low_stock", None)}
+    assert_in_line(db_session, cat)
+
+    do_receive(db_session, cat, milk(cat, "5", expires_day=20), received_at=nov(11))
+    assert (suggested(db_session, cat), open_alerts(db_session, cat)) == ([], set())
     assert_in_line(db_session, cat)
 
 
