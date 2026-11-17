@@ -143,12 +143,13 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 - Branch, PR, merge commit: feat/sim-week2
 - Plan:
-  1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows.
-  2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing, never on the last day. Standing orders and their carry go.
+  1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, low-stock levels included (D83), each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows, with their low_stock_level.
+  2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing. Standing orders and their carry go. A run that ends today stops at the current time (D82): the last day's events dated after it are left out, counts included, so D78's last-day rule goes.
   3. Summary and CLI: the new counters, and the tallies of alerts and orders read at the end.
-  4. Tests: seed (par levels), gate 1's test with the new path checks (D81), determinism extended to alerts, orders and counts, and the existing failure and default-end-date tests.
-  5. Docs: CLAUDE.md (commands, milestone text stays for task 7), README, `docs/schema.md` rule 10's sweep sentence, D82.
-- Decisions: D76 par levels as venue data and opening stock; D77 how the owner orders, late, short and cancelled deliveries; D78 shrinkage, weekly counts, no count on the last day; D79 the daily sweep and expired waste from alerts; D80 reversals never cross a count; D81 the summary and gate 1's test.
+  4. Tests: seed (par levels), gate 1's test with the new path checks (D81), determinism extended to alerts, orders and counts, the existing failure test, and the default-end-date test now checking that nothing is dated after the current time (D82).
+  5. Docs: CLAUDE.md (commands, milestone text stays for task 7), README, `docs/schema.md` rule 10's sweep sentence, D85.
+  - Updated on 17 Nov after Yazan's D82 and D83, before the build was finished; the work in progress (adfc8bf) had kept D41's full last day and D78's rule.
+- Decisions: D76 par levels as venue data and opening stock; D77 how the owner orders, late, short and cancelled deliveries; D78 shrinkage, weekly counts (its last-day rule replaced by Yazan's D82); D79 the daily sweep and expired waste from alerts; D80 reversals never cross a count; D81 the summary and gate 1's test. Yazan's D82 (the last day stops at the current time) and D83 (low-stock levels, here as venue data). Details row: D85.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
