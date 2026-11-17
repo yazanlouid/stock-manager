@@ -272,11 +272,18 @@ def test_a_batch_without_an_expiry_date_never_expires(db_session: Session, cat: 
 # --- Low stock ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("on_hand", "low"), [("2000.001", False), ("2000", True), ("0", True)])
-def test_low_stock_is_due_at_or_below_the_reorder_point(
+# At the reorder point and above the low-stock level, a draft line is due
+# but the item isn't short (D83).
+@pytest.mark.parametrize(
+    ("on_hand", "low"), [("3000", False), ("2000.001", False), ("2000", True), ("0", True)]
+)
+def test_low_stock_is_due_at_or_below_its_level_not_at_the_reorder_point(
     db_session: Session, cat: Catalogue, on_hand: str, low: bool
 ):
-    add(db_session, new_par_level(cat.location, cat.item, reorder_point=d("2000")))
+    add(
+        db_session,
+        new_par_level(cat.location, cat.item, low_stock_level=d("2000"), reorder_point=d("3000")),
+    )
     batch_with(db_session, cat, on_hand, expires_day=20)
 
     evaluate(db_session, cat, nov(10))
@@ -292,10 +299,11 @@ def test_an_item_with_a_par_level_and_no_stock_at_all_is_low(db_session: Session
     assert open_alerts(db_session, cat) == {("low_stock", None)}
 
 
-def test_low_stock_resolves_when_stock_rises_above_the_reorder_point(
-    db_session: Session, cat: Catalogue
-):
-    add(db_session, new_par_level(cat.location, cat.item, reorder_point=d("2000")))
+def test_low_stock_resolves_when_stock_rises_above_its_level(db_session: Session, cat: Catalogue):
+    add(
+        db_session,
+        new_par_level(cat.location, cat.item, low_stock_level=d("2000"), reorder_point=d("3000")),
+    )
     batch = batch_with(db_session, cat, "500", expires_day=20)
     evaluate(db_session, cat, nov(10))
 
@@ -326,15 +334,18 @@ def test_an_inactive_item_is_never_low_but_its_stock_still_alerts(
 def test_usable_on_hand_sums_every_batch_and_a_negative_default_counts_against_it(
     db_session: Session, cat: Catalogue
 ):
-    add(db_session, new_par_level(cat.location, cat.item, reorder_point=d("2000")))
+    add(
+        db_session,
+        new_par_level(cat.location, cat.item, low_stock_level=d("2000"), reorder_point=d("3000")),
+    )
     batch_with(db_session, cat, "1500", expires_day=20)
     batch_with(db_session, cat, "1500", expires_day=22)
     default = default_with(db_session, cat, "0")
 
-    # 3000 usable: above the reorder point.
+    # 3000 usable: above the low-stock level.
     assert evaluate(db_session, cat, nov(10)) == []
 
-    # A shortfall of 1000 leaves 2000: at the reorder point.
+    # A shortfall of 1000 leaves 2000: at the low-stock level.
     set_on_hand(db_session, default, "-1000")
     evaluate(db_session, cat, nov(10, 10))
     assert open_alerts(db_session, cat) == {("low_stock", None), ("negative_stock", default.id)}
@@ -343,7 +354,10 @@ def test_usable_on_hand_sums_every_batch_and_a_negative_default_counts_against_i
 def test_expired_stock_is_not_usable_so_a_sweep_can_make_an_item_low(
     db_session: Session, cat: Catalogue
 ):
-    add(db_session, new_par_level(cat.location, cat.item, reorder_point=d("2000")))
+    add(
+        db_session,
+        new_par_level(cat.location, cat.item, low_stock_level=d("2000"), reorder_point=d("3000")),
+    )
     old = batch_with(db_session, cat, "3000", expires_day=10)
     batch_with(db_session, cat, "1000", expires_day=25)
 
@@ -616,19 +630,24 @@ def test_a_shortfall_raises_negative_stock_and_the_next_receipt_resolves_it(
     assert_in_line(db_session, cat)
 
 
-def test_usage_down_to_the_reorder_point_raises_low_stock_and_a_receipt_resolves_it(
+# Flour is low at 5 kg, reordered at 10 kg, up to 50 kg.
+FLOUR_LEVELS = {
+    "low_stock_level": d("5000"),
+    "reorder_point": d("10000"),
+    "order_up_to": d("50000"),
+}
+
+
+def test_usage_down_to_the_low_stock_level_raises_low_stock_and_a_receipt_resolves_it(
     db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
 ):
     item, sack = flour  # 25 kg sacks, no batch tracking
-    add(
-        db_session,
-        new_par_level(cat.location, item, reorder_point=d("5000"), order_up_to=d("50000")),
-    )
+    add(db_session, new_par_level(cat.location, item, **FLOUR_LEVELS))
     do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(9))
     assert open_alerts(db_session, cat) == set()
 
     do_use(db_session, cat, item, "19999", occurred_at=nov(10, 8))
-    assert open_alerts(db_session, cat) == set()  # 5001 left: above the reorder point
+    assert open_alerts(db_session, cat) == set()  # 5001 left: above the low-stock level
     do_use(db_session, cat, item, "1", occurred_at=nov(10, 9))
     (alert,) = alerts(db_session, cat)
     assert (alert.type, alert.item_id, alert.raised_at) == ("low_stock", item.id, nov(10, 9))
@@ -684,10 +703,7 @@ def test_a_count_raises_and_resolves_alerts_for_the_items_it_counts(
     db_session: Session, cat: Catalogue, flour: tuple[Item, ItemUnit]
 ):
     item, sack = flour
-    add(
-        db_session,
-        new_par_level(cat.location, item, reorder_point=d("5000"), order_up_to=d("50000")),
-    )
+    add(db_session, new_par_level(cat.location, item, **FLOUR_LEVELS))
     do_receive(db_session, cat, line(item, sack, "1", "12.500"), received_at=nov(5))
     expired = do_receive(db_session, cat, milk(cat, "2", expires_day=8), received_at=nov(5))
     batch_id = expired.movements[0].batch_id

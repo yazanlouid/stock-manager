@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 3, step 8 (CI and merge)
-- Branch and PR: feat/draft-orders, PR #11
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 built, checked, reviewed and the review's findings fixed (D67–D75)
-- Next: watch PR #11's CI, squash-merge it into run/week-2 when green, then start task 4 on `feat/sim-week2`
-- Next decision ID: D76
-- Updated: 2026-11-16 19:53
+- Task and step: D83 (the low-stock level), step 8 (CI and merge); task 4 paused at step 4
+- Branch and PR: feat/low-stock-level, PR #12; task 4's work in progress is saved on feat/sim-week2 (adfc8bf)
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); task 4's decisions D76–D81, plan and simulator rewrite (untested, on feat/sim-week2); Yazan's D82 and D83 added
+- Next: build D83 in the commit order of its plan below; then merge run/week-2 into feat/sim-week2 (no rebase), update task 4's plan for D82 and D83, and build task 4
+- Next decision ID: D84 (D83's details row)
+- Updated: 2026-11-17 12:07
 
 ## For Yazan (look at these first)
 
@@ -110,6 +110,29 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - The property machine failed once in the full run, in the new `send_draft` rule. It was the test's own expectation, not the domain: a line left alone keeps the owner's number from an earlier refused send, and the rule assumed it ordered the suggestion. Fixed in the test; it then passed three runs in a row. A mutation check (CEIL changed to FLOOR in the draft-line query) was caught.
   - A refused receipt against an order first raised its error after writing the receipt's movements (the API would have rolled them back, but a domain function refuses before it writes). The order is now closed as the last check, before anything is written, and a test checks nothing is left behind.
 
+### D83: the low-stock level (Yazan's decision, before task 4)
+
+- Branch, PR, merge commit: feat/low-stock-level, PR #12
+- Plan: one commit per step, each with its tests.
+  1. Table: `par_levels.low_stock_level`, numeric(14,3), required, with checks 0 ≤ `low_stock_level` ≤ `reorder_point`. A new migration adds it, fills existing rows with their reorder_point (the one value that leaves their alerts as they were), then makes it NOT NULL. The builder's default is half the reorder point. Schema tests for the checks.
+  2. Alerts: low_stock is due when usable on-hand is at or below `low_stock_level` (`app/domain/alerts.py`'s due query, which reconcile shares, so reconcile follows). Draft lines keep `reorder_point`. Worked examples: due at the level, not between the level and the reorder point (where a draft line is due), resolved above it.
+  3. Property machine: each par level gets a low-stock level below its reorder point, and the Python evaluation of low stock uses it, so the machine covers the band where a line is due and no alert is.
+  4. Docs: `docs/schema.md` (par_levels, rules 8 and 10, checks), the D84 details row.
+- Decisions: D84 (details): the column's name, required, the backfill, and what an item without one does.
+- Checks:
+  - `uv run pytest`: 548 passed in 187.3 s (546 after task 3). Gate 1's test 56.0 s in the full run and 49.4 s alone (43.0 s after task 3's fixes); the property machine 52.1 s (43.8 s). This branch can't change gate 1's work: the simulator sets no par levels until task 4, so the low-stock condition never matches there, and the reset's time (48 s against 49.7 s) agrees. The machine is slower today, as on 15 Nov; the property machine also walks a new band now.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 67 files.
+  - Migration round trip on the dev database (upgrade, downgrade -1, upgrade): `6f33477b5349 -> 7a9b465f4743` each way; the 40 par-level rows task 4's work in progress had seeded took their reorder points.
+  - `reset --end-date 2026-10-31`: 48 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline.
+  - reconcile: Dar Zaatar Café OK.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Review: `/code-review` at high effort on PR #12, two findings.
+  1. Fixed: no worked example covered the band between the two levels through the stock writes, where a draft line is due and no alert is. `test_between_the_low_stock_level_and_the_reorder_point_milk_is_on_the_draft_but_not_low` in `tests/test_draft_lines.py` walks milk down through it and back.
+  2. Declined: `ck_par_levels_reorder_point_non_negative` is now implied by the two new checks. Dropping it would be a migration that gains nothing; D84 says it stays.
+  - After the fix: `tests/test_draft_lines.py` 27 passed, ruff clean.
+- Notes:
+  - A mutation check on the property machine (the alerts query back on reorder_point) was caught, after Hypothesis shrank it for five minutes.
+
 ### Task 4: the simulator on week 2 rules, for the café
 
 - Branch, PR, merge commit:
@@ -164,3 +187,4 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-16 19:44: resumed in the same session after Yazan's "Try again" (model unchanged). Postgres had exited (code 0) about 20 hours earlier; `docker compose up -d db` brought it back with the dev data intact.
 - 2026-11-16 19:47: PR #11 opened for task 3.
 - 2026-11-16 19:53: PR #11 reviewed (five findings, four fixed, one declined) and the fixes pushed.
+- 2026-11-17 12:07: resumed in a new session on Claude Opus 5.5 (Fable 5.2 no longer available), after Yazan answered two For Yazan items with D82 and D83. The working tree held task 4's simulator rewrite, uncommitted; it lints clean but its tests aren't updated, so it was committed as work in progress on feat/sim-week2 (adfc8bf). D83 is built first, on feat/low-stock-level.

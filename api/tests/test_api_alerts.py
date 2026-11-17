@@ -80,7 +80,12 @@ def kinds(alerts: list[dict[str, Any]]) -> list[tuple[str, str]]:
 def test_alerts_carry_their_item_location_and_batch(
     client: TestClient, db_session: Session, cat: Catalogue
 ):
-    add(db_session, new_par_level(cat.location, cat.item, reorder_point=Decimal("2000")))
+    add(
+        db_session,
+        new_par_level(
+            cat.location, cat.item, low_stock_level=Decimal("2000"), reorder_point=Decimal("2000")
+        ),
+    )
     batch_id = receive_milk(client, cat, "2", expires_day=12, at=nov(9, 6))
 
     expiring, low = get_alerts(client, cat)
