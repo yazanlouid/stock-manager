@@ -30,6 +30,14 @@ needs a receipt line. Each later day runs, in time order:
   with a line raised, and its delivery is planned for the delivery day;
 - last, the day's count of the items whose count day it is (D78).
 
+The last day and the clock (D82). When the run ends today in the business's
+timezone, the last day stops at the current time: its events dated later are
+left out, counts and orders included, so nothing is dated in the future and
+the API can write and count straight away (D51). They are still planned, so
+the random draws, and every day before, are the same as in a full run. A run
+whose end date has passed runs in full and is deterministic; an end date in
+the future is refused.
+
 Orders (D52, D77). Nothing here decides how much to order: the draft lines
 come from the par levels (domain rule 8). The simulator only plays the owner,
 who sends drafts on order days, and the supplier, who delivers.
@@ -164,6 +172,8 @@ class SimulationSummary:
     alerts_open: Counter[str] = field(default_factory=Counter)
     # Orders that have lines, by status; a draft here is waiting for its order day.
     orders_by_status: Counter[str] = field(default_factory=Counter)
+    # When the last day was stopped (D82), or None when it ran in full.
+    stopped_at: datetime | None = None
 
     @property
     def first_day(self) -> date:
@@ -343,13 +353,17 @@ def simulate(
     """Simulate the venue's `days` days ending on end_date, plus the opening day 0.
 
     The business must have been seeded from the same venue (seed.py). end_date
-    defaults to today in the business's timezone. Commits after each day.
+    defaults to today in the business's timezone, and can't be later; a run
+    that ends today stops at the current time (D82). Commits after each day.
     """
     if days < 1:
         raise ValueError(f"days must be at least 1, got {days}")
     run = _Run(session, business_id, venue, random.Random(random_seed))
+    today = run.local_today()
     if end_date is None:
-        end_date = run.local_today()
+        end_date = today
+    elif end_date > today:
+        raise ValueError(f"end_date {end_date} is in the future: today is {today} (D82)")
     summary = SimulationSummary(
         opening_day=end_date - timedelta(days=days),
         end_date=end_date,
@@ -481,6 +495,19 @@ class _Run:
             {"business_id": self.business_id},
         )
 
+    def _cutoff(self, day: date) -> datetime | None:
+        """The current time if `day` is today in the business's timezone, else
+        None (D82). clock_timestamp(), not now(), which is the start of the
+        transaction."""
+        current, local_date = self.session.execute(
+            text(
+                "SELECT clock_timestamp(), (clock_timestamp() AT TIME ZONE timezone)::date"
+                " FROM businesses WHERE id = :business_id"
+            ),
+            {"business_id": self.business_id},
+        ).one()
+        return current if local_date == day else None
+
     # --- Days -------------------------------------------------------------------
 
     def run(self, summary: SimulationSummary) -> None:
@@ -492,8 +519,14 @@ class _Run:
                 if index == 0:
                     events = self._plan_opening(day)
                 else:
-                    events = self._plan_day(day, last=index == summary.days)
-                for occurred_at, event in self._timed(events):
+                    events = self._plan_day(day)
+                timed = self._timed(events)
+                if index == summary.days:
+                    cutoff = self._cutoff(day)
+                    if cutoff is not None:
+                        summary.stopped_at = cutoff
+                        timed = [(at, event) for at, event in timed if at <= cutoff]
+                for occurred_at, event in timed:
                     self.event = f"{event.action.describe()} at {event.local_time:%H:%M:%S}"
                     self.doing = self.event
                     self._execute(event.action, occurred_at)
@@ -582,7 +615,7 @@ class _Run:
             events.append(_Event(when, delivery))
         return events
 
-    def _plan_day(self, day: date, *, last: bool) -> list[_Event]:
+    def _plan_day(self, day: date) -> list[_Event]:
         """The day's events. Deliveries were planned when their orders were sent."""
         venue = self.venue
         events = [
@@ -605,11 +638,8 @@ class _Run:
 
         events.append(_Event(datetime.combine(day, venue.closes), _ClosingCheck(day)))
         events.append(_Event(datetime.combine(day, venue.order_time), _SendOrders(day)))
-        # No count on the last day: it may run past the current time (D41),
-        # and a count dated tonight would make the API refuse writes for
-        # these items until then (D51, D78).
         counted = tuple(item for item in self.items if item.spec.count_weekday == day.weekday())
-        if counted and not last:
+        if counted:
             count = _Count(counted, self._client_id())
             events.append(_Event(datetime.combine(day, venue.count_time), count))
         return events

@@ -64,7 +64,8 @@ def _parser() -> argparse.ArgumentParser:
         "--end-date",
         type=date.fromisoformat,
         default=None,
-        help="last simulated day, YYYY-MM-DD (default: today in the business's timezone)",
+        help="last simulated day, YYYY-MM-DD, not after today (default: today in the"
+        " business's timezone; a run that ends today stops at the current time)",
     )
     options.add_argument(
         "--random-seed",
@@ -137,6 +138,11 @@ def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> i
             print(f"Simulation stopped: {exc}", file=sys.stderr)
             print("Days before the failed one are committed.", file=sys.stderr)
             return 1
+        except ValueError as exc:
+            # Refused before the first day, so nothing is committed, the seed
+            # included: the session rolls back when it closes.
+            print(f"Can't simulate: {exc}", file=sys.stderr)
+            return 1
     print(f"Simulated {CAFE.name}.")
     for line in format_summary(summary):
         print(line)
@@ -151,7 +157,12 @@ def format_summary(summary: SimulationSummary) -> list[str]:
     shortfalls = ", ".join(f"{sku} {n}" for sku, n in sorted(summary.shortfalls_by_sku.items()))
     return [
         f"Days: {summary.days}, {summary.first_day} to {summary.end_date}"
-        f" (opening stock on {summary.opening_day}), random seed {summary.random_seed}",
+        f" (opening stock on {summary.opening_day}), random seed {summary.random_seed}"
+        + (
+            f"; the last day stopped at the current time, {summary.stopped_at:%Y-%m-%d %H:%M %z}"
+            if summary.stopped_at
+            else ""
+        ),
         f"Orders: sent {summary.orders_sent}, received {summary.orders_received},"
         f" cancelled {summary.orders_cancelled}; now {counts(summary.orders_by_status)}",
         f"Receipts: {summary.receipts} ({summary.late_deliveries} late,"
