@@ -22,8 +22,9 @@ from app.models.columns import CreatedAt, UuidPk
 class ParLevel(Base):
     """The reorder rule for one item at one location, in the item's base unit.
 
-    When usable on-hand falls to reorder_point the item is low, and a draft
-    order brings it back up to order_up_to (domain rule 8).
+    When usable on-hand falls to reorder_point, a draft order brings it back up
+    to order_up_to (domain rule 8). When it falls further, to low_stock_level,
+    the item is short and has a low_stock alert (D83).
     """
 
     __tablename__ = "par_levels"
@@ -32,6 +33,10 @@ class ParLevel(Base):
         # Ordering up to nothing would never order anything.
         CheckConstraint("order_up_to > 0", name="order_up_to_positive"),
         CheckConstraint("reorder_point <= order_up_to", name="reorder_point_at_most_order_up_to"),
+        CheckConstraint("low_stock_level >= 0", name="low_stock_level_non_negative"),
+        CheckConstraint(
+            "low_stock_level <= reorder_point", name="low_stock_level_at_most_reorder_point"
+        ),
         ForeignKeyConstraint(
             ["business_id", "location_id"], ["locations.business_id", "locations.id"]
         ),
@@ -46,6 +51,7 @@ class ParLevel(Base):
     item_id: Mapped[uuid.UUID]
     reorder_point: Mapped[Decimal]
     order_up_to: Mapped[Decimal]
+    low_stock_level: Mapped[Decimal]
     created_at: Mapped[CreatedAt]
 
 

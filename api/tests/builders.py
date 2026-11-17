@@ -248,15 +248,17 @@ def new_count_adjust(batch: Batch, line: StockCountLine, **overrides: Any) -> St
 
 
 def new_par_level(location: Location, item: Item, **overrides: Any) -> ParLevel:
-    """Reorder at 2000 base units and order up to 6000."""
+    """Reorder at 2000 base units and order up to 6000. The low-stock level is
+    half the reorder point, 1000 unless reorder_point is overridden."""
     values = {
         "business_id": location.business_id,
         "location_id": location.id,
         "item_id": item.id,
         "reorder_point": Decimal("2000"),
         "order_up_to": Decimal("6000"),
-    }
-    return ParLevel(**(values | overrides))
+    } | overrides
+    values.setdefault("low_stock_level", values["reorder_point"] / 2)
+    return ParLevel(**values)
 
 
 def new_alert(location: Location, item: Item, **overrides: Any) -> Alert:

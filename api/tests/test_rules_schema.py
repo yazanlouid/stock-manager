@@ -55,12 +55,17 @@ def test_valid_rule_rows_get_server_defaults(db_session: Session, stock: Stock) 
 
 def test_boundary_values_are_accepted(db_session: Session, stock: Stock) -> None:
     c = stock.cat
-    # Reorder only when nothing is left, and a reorder point equal to order_up_to.
+    # Reorder and alert only when nothing is left (the builder's low-stock
+    # level is half the reorder point, so 0), and all three levels equal.
     add(db_session, new_par_level(c.location, c.item, reorder_point=Decimal("0")))
     add(
         db_session,
         new_par_level(
-            c.location, stock.flour, reorder_point=Decimal("500"), order_up_to=Decimal("500")
+            c.location,
+            stock.flour,
+            low_stock_level=Decimal("500"),
+            reorder_point=Decimal("500"),
+            order_up_to=Decimal("500"),
         ),
     )
     # Resolved at the moment it was raised.
@@ -108,10 +113,19 @@ BadRow = Callable[[Stock], Base]
 
 BAD_ROWS: list[Any] = [
     # par_levels
+    # ck_par_levels_reorder_point_non_negative still stands, but since D83 a
+    # negative reorder point always breaks one of the low-stock checks too,
+    # and Postgres reports the first failing check by name. The low-stock
+    # level's two checks imply it.
     pytest.param(
-        lambda s: new_par_level(s.cat.location, s.flour, reorder_point=Decimal("-0.001")),
-        "ck_par_levels_reorder_point_non_negative",
-        id="reorder-point-negative",
+        lambda s: new_par_level(s.cat.location, s.flour, low_stock_level=Decimal("-0.001")),
+        "ck_par_levels_low_stock_level_non_negative",
+        id="low-stock-level-negative",
+    ),
+    pytest.param(
+        lambda s: new_par_level(s.cat.location, s.flour, low_stock_level=Decimal("2000.001")),
+        "ck_par_levels_low_stock_level_at_most_reorder_point",
+        id="low-stock-level-above-reorder-point",
     ),
     pytest.param(
         lambda s: new_par_level(
