@@ -4,8 +4,9 @@ Draft lines are a projection, like alerts (D67): a supplier's draft at a
 location holds exactly the lines that are due. A line is due for an item
 there when (D68)
 - the item is active, has a par level and has a preferred supplier;
-- its usable on-hand is at or below reorder_point (the low_stock condition,
-  with the same usable on-hand, D64);
+- its usable on-hand is at or below reorder_point (the same usable on-hand
+  as low stock, D64; low stock itself waits for the lower low_stock_level,
+  D83);
 - order_up_to minus usable on-hand minus what is on order is above zero.
 The line goes on the preferred supplier's draft, in that supplier's pack
 unit, for that amount rounded up to whole packs. On order is the item's

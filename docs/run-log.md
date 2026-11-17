@@ -5,17 +5,17 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 4, step 4 (build)
-- Branch and PR: feat/sim-week2, no PR yet
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); task 4's decisions D76–D81 and plan
-- Next: build task 4 in the commit order of its plan below
-- Next decision ID: D82 (task 4's details row)
-- Updated: 2026-11-16 20:00
+- Task and step: task 4, step 3 (plan update for D82 and D83), then step 4 (build)
+- Branch and PR: feat/sim-week2, no PR yet; run/week-2 (with D83) merged into it
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4's decisions D76–D81, plan and simulator rewrite in progress (adfc8bf, tests not yet updated)
+- Next: update task 4's plan for D82 and D83, then build it
+- Next decision ID: D85 (task 4's details row)
+- Updated: 2026-11-17 12:28
 
 ## For Yazan (look at these first)
 
-- **The last day and now() (D78): I kept D41 and propose changing it.** D41 says the last simulated day runs in full, even past the current time. With night counts that would stop API writes for the counted items until tonight, so the simulator doesn't count on its last day. The older problem remains: after a reset during the day, the API can't count an item until tomorrow, because movements dated later today already exist (D51). The fix is to stop the last day at the current time, which changes D41, so it is yours to decide; the plan mentions it as brought forward from week 3.
-- **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
+- **Answered by Yazan (D82): the last day stops at the current time.** Built in task 4. What I wrote: **The last day and now() (D78): I kept D41 and propose changing it.** D41 says the last simulated day runs in full, even past the current time. With night counts that would stop API writes for the counted items until tonight, so the simulator doesn't count on its last day. The older problem remains: after a reset during the day, the API can't count an item until tomorrow, because movements dated later today already exist (D51). The fix is to stop the last day at the current time, which changes D41, so it is yours to decide; the plan mentions it as brought forward from week 3.
+- **Answered by Yazan (D83): low stock has its own level.** Built in PR #12 (D84), and the café's levels come in task 4. What I wrote: **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
 - **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
@@ -116,6 +116,29 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - The property machine failed once in the full run, in the new `send_draft` rule. It was the test's own expectation, not the domain: a line left alone keeps the owner's number from an earlier refused send, and the rule assumed it ordered the suggestion. Fixed in the test; it then passed three runs in a row. A mutation check (CEIL changed to FLOOR in the draft-line query) was caught.
   - A refused receipt against an order first raised its error after writing the receipt's movements (the API would have rolled them back, but a domain function refuses before it writes). The order is now closed as the last check, before anything is written, and a test checks nothing is left behind.
 
+### D83: the low-stock level (Yazan's decision, before task 4)
+
+- Branch, PR, merge commit: feat/low-stock-level, PR #12, merged into run/week-2 as c22a57d (CI 1m47s)
+- Plan: one commit per step, each with its tests.
+  1. Table: `par_levels.low_stock_level`, numeric(14,3), required, with checks 0 ≤ `low_stock_level` ≤ `reorder_point`. A new migration adds it, fills existing rows with their reorder_point (the one value that leaves their alerts as they were), then makes it NOT NULL. The builder's default is half the reorder point. Schema tests for the checks.
+  2. Alerts: low_stock is due when usable on-hand is at or below `low_stock_level` (`app/domain/alerts.py`'s due query, which reconcile shares, so reconcile follows). Draft lines keep `reorder_point`. Worked examples: due at the level, not between the level and the reorder point (where a draft line is due), resolved above it.
+  3. Property machine: each par level gets a low-stock level below its reorder point, and the Python evaluation of low stock uses it, so the machine covers the band where a line is due and no alert is.
+  4. Docs: `docs/schema.md` (par_levels, rules 8 and 10, checks), the D84 details row.
+- Decisions: D84 (details): the column's name, required, the backfill, and what an item without one does.
+- Checks:
+  - `uv run pytest`: 548 passed in 187.3 s (546 after task 3). Gate 1's test 56.0 s in the full run and 49.4 s alone (43.0 s after task 3's fixes); the property machine 52.1 s (43.8 s). This branch can't change gate 1's work: the simulator sets no par levels until task 4, so the low-stock condition never matches there, and the reset's time (48 s against 49.7 s) agrees. The machine is slower today, as on 15 Nov; the property machine also walks a new band now.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 67 files.
+  - Migration round trip on the dev database (upgrade, downgrade -1, upgrade): `6f33477b5349 -> 7a9b465f4743` each way; the 40 par-level rows task 4's work in progress had seeded took their reorder points.
+  - `reset --end-date 2026-10-31`: 48 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline.
+  - reconcile: Dar Zaatar Café OK.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Review: `/code-review` at high effort on PR #12, two findings.
+  1. Fixed: no worked example covered the band between the two levels through the stock writes, where a draft line is due and no alert is. `test_between_the_low_stock_level_and_the_reorder_point_milk_is_on_the_draft_but_not_low` in `tests/test_draft_lines.py` walks milk down through it and back.
+  2. Declined: `ck_par_levels_reorder_point_non_negative` is now implied by the two new checks. Dropping it would be a migration that gains nothing; D84 says it stays.
+  - After the fix: `tests/test_draft_lines.py` 27 passed, ruff clean.
+- Notes:
+  - A mutation check on the property machine (the alerts query back on reorder_point) was caught, after Hypothesis shrank it for five minutes.
+
 ### Task 4: the simulator on week 2 rules, for the café
 
 - Branch, PR, merge commit: feat/sim-week2
@@ -177,3 +200,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-16 19:53: PR #11 reviewed (five findings, four fixed, one declined) and the fixes pushed.
 - 2026-11-16 19:55: PR #11 green (CI 1m51s) and squash-merged into run/week-2 as 66e388c.
 - 2026-11-16 20:00: task 4 started on feat/sim-week2.
+- 2026-11-17 12:07: resumed in a new session on Claude Opus 5.5 (Fable 5.2 no longer available), after Yazan answered two For Yazan items with D82 and D83. The working tree held task 4's simulator rewrite, uncommitted; it lints clean but its tests aren't updated, so it was committed as work in progress on feat/sim-week2 (adfc8bf). D83 is built first, on feat/low-stock-level.
+- 2026-11-17 12:20: PR #12 opened for D83, reviewed (two findings, one fixed, one declined).
+- 2026-11-17 12:27: PR #12 green (CI 1m47s) and squash-merged into run/week-2 as c22a57d.
+- 2026-11-17 12:28: run/week-2 merged into feat/sim-week2 (conflicts in decisions.md and the run log only); task 4 resumes.

@@ -145,7 +145,7 @@ class StockLedgerMachine(RuleBasedStateMachine):
         ]
 
         # Alerts and draft orders. Milk's window comes from its shelf life;
-        # eggs and flour have none. The reorder points sit inside the
+        # eggs and flour have none. The levels sit inside the
         # quantities the rules draw, so low stock comes and goes. Milk's
         # preferred supplier is the catalogue's, and flour gets the same one,
         # so both go on one draft. The par levels are added as rows, so their
@@ -154,15 +154,26 @@ class StockLedgerMachine(RuleBasedStateMachine):
         self.cat.item.shelf_life_days = MILK_SHELF_LIFE_DAYS
         flour_bag = self.items[2][1]
         add(self.db, new_supplier_item(self.cat.supplier, flour, flour_bag, is_preferred=True))
-        self.reorder_points = {self.cat.item.id: Decimal("1000"), flour.id: Decimal("500")}
+        # (low_stock_level, reorder_point) per item: low stock at the first,
+        # a draft line at the second (D83), so the machine also walks the band
+        # where a line is due and no alert is.
+        self.levels = {
+            self.cat.item.id: (Decimal("400"), Decimal("1000")),
+            flour.id: (Decimal("200"), Decimal("500")),
+        }
         for item, _ in self.items:
-            if item.id in self.reorder_points:
-                reorder_point = self.reorder_points[item.id]
-                add(self.db, new_par_level(self.cat.location, item, reorder_point=reorder_point))
+            if item.id in self.levels:
+                low, reorder = self.levels[item.id]
+                add(
+                    self.db,
+                    new_par_level(
+                        self.cat.location, item, low_stock_level=low, reorder_point=reorder
+                    ),
+                )
         evaluate_rules(
             self.db,
             business_id,
-            [(self.cat.location.id, item_id) for item_id in self.reorder_points],
+            [(self.cat.location.id, item_id) for item_id in self.levels],
             datetime.combine(FIRST_DAY, time(0), UTC),
         )
         # The business's alerts date: None until the first sweep (D61).
@@ -843,8 +854,8 @@ class StockLedgerMachine(RuleBasedStateMachine):
                 if batch.on_hand > 0 and dated and not expired:
                     if (batch.expires_on - self.swept_on).days <= self.expiry_window(item):
                         due.add(("expiring", item.id, batch.id))
-            reorder_point = self.reorder_points.get(item.id)
-            if reorder_point is not None and self.usable_on_hand(stock[item.id]) <= reorder_point:
+            levels = self.levels.get(item.id)
+            if levels is not None and self.usable_on_hand(stock[item.id]) <= levels[0]:
                 due.add(("low_stock", item.id, None))
         return due
 
@@ -876,9 +887,10 @@ class StockLedgerMachine(RuleBasedStateMachine):
 
         due = []
         for item, _ in self.items:
-            reorder_point = self.reorder_points.get(item.id)
-            if reorder_point is None:
+            levels = self.levels.get(item.id)
+            if levels is None:
                 continue
+            reorder_point = levels[1]
             usable = self.usable_on_hand(stock[item.id])
             needed = ORDER_UP_TO - usable - on_order[item.id]
             if usable <= reorder_point and needed > 0:
