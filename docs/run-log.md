@@ -5,8 +5,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 4, step 6 (PR)
-- Branch and PR: feat/sim-week2, no PR yet
+- Task and step: task 4, step 8 (CI and merge)
+- Branch and PR: feat/sim-week2, PR #13
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 built and checked
 - Next: open task 4's PR, review, CI, merge; then task 5
 - Next decision ID: D86
@@ -144,7 +144,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
-- Branch, PR, merge commit: feat/sim-week2
+- Branch, PR, merge commit: feat/sim-week2, PR #13
 - Plan:
   1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, low-stock levels included (D83), each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows, with their low_stock_level.
   2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing. Standing orders and their carry go. A run that ends today stops at the current time (D82): the last day's events dated after it are left out, counts included, so D78's last-day rule goes.
@@ -161,7 +161,13 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - `reset` with no end date (D82): the 30 days up to 17 Nov, stopped at 12:43 UTC; nothing in movements, counts, alerts or orders is dated after the current time.
   - reconcile: Dar Zaatar Café OK after both.
   - `git diff --check run/week-2...HEAD`: nothing.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #13, five findings, all fixed.
+  1. `reset --end-date` in the future recreated the schema (erasing the demo data) and only then had simulate() refuse it. The CLI now checks the end date against today in the café's timezone before it asks or touches anything; a test makes recreate_schema and the prompt fail if reached.
+  2. A count took the unlogged loss from expired batches first, though usage (and so over-portioning) skips them. Loss now comes from the batches usage draws, expired ones last. The 30-day summary is unchanged: no count in it met an expired batch with loss to take.
+  3. The CLI caught every ValueError from simulate() and said nothing was committed; with the end date checked first, that catch is gone.
+  4. `summary.expired_by_sku` was written and never read (since week 1); removed.
+  5. Gate 1's path check hardcoded 2 Oct as the first day; it takes it from the summary.
+  - After the fixes: 553 passed in 150.5 s, gate 1's test 46.4 s, ruff clean, reset summary identical, reconcile OK.
 - Notes:
   - Low-stock alerts in the 30 days went from 440 (at the reorder point, the work in progress before D83) to 142. About 40 are day 0's: the first sweep finds every item empty before its opening delivery. Most of the rest open in the evening after a busy day, or after a late or short delivery, and close with the next morning's delivery.
   - Pastries run short most often (shortfalls on busy Fridays and Saturdays, and when a daily delivery is late). Demand isn't capped by stock, so a late delivery shows as a shortfall rather than lost sales (Assumptions).
