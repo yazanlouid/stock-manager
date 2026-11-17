@@ -203,10 +203,10 @@ def test_gate_1_thirty_cafe_days_reconcile(db_session: Session):
     assert tracked_shortfalls >= 1
     assert {"expired", "spoiled"} <= waste_reasons
     assert by_type.get("reversal", 0) >= 1
-    assert_week_2_paths(db_session, business_id)
+    assert_week_2_paths(db_session, business_id, summary.first_day)
 
 
-def assert_week_2_paths(db: Session, business_id) -> None:
+def assert_week_2_paths(db: Session, business_id, first_day: date) -> None:
     """D81: the rules and the owner's ordering ran on their own."""
     # Every kind of alert was raised, and the alerts date is the end date (D79).
     raised = set(db.scalars(select(Alert.type).where(Alert.business_id == business_id)))
@@ -232,7 +232,7 @@ def assert_week_2_paths(db: Session, business_id) -> None:
     receipts = db.scalars(
         select(Receipt).where(
             Receipt.business_id == business_id,
-            Receipt.received_at >= datetime.combine(date(2026, 10, 2), time(0), AMMAN),
+            Receipt.received_at >= datetime.combine(first_day, time(0), AMMAN),
         )
     ).all()
     assert receipts and all(receipt.po_id is not None for receipt in receipts)

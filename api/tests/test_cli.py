@@ -106,8 +106,21 @@ def test_simulate_refuses_an_end_date_in_the_future_and_leaves_nothing(
     args = ["simulate", "--days", "1", "--end-date", "2999-01-01"]
     assert cli.main(args, session_factory) == 1
 
-    assert "Can't simulate: end_date 2999-01-01 is in the future" in capsys.readouterr().err
+    assert "Can't simulate: the end date 2999-01-01 is in the future" in capsys.readouterr().err
     assert db_session.scalar(select(func.count()).select_from(Business)) == 0
+
+
+def test_reset_refuses_an_end_date_in_the_future_before_erasing_anything(
+    session_factory, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("reset asked or recreated the schema")
+
+    monkeypatch.setattr(cli, "recreate_schema", must_not_run)
+    monkeypatch.setattr("builtins.input", must_not_run)
+
+    assert cli.main(["reset", "--end-date", "2999-01-01"], session_factory) == 1
+    assert "in the future" in capsys.readouterr().err
 
 
 def test_reconcile_exits_zero_and_prints_each_business_id(

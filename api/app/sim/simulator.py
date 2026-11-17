@@ -166,7 +166,6 @@ class SimulationSummary:
     waste_by_reason: Counter[str] = field(default_factory=Counter)
     # Usage entries (not mistakes) that took a default batch (further) negative.
     shortfalls_by_sku: Counter[str] = field(default_factory=Counter)
-    expired_by_sku: Counter[str] = field(default_factory=Counter)
     reversals: int = 0
     alerts_raised: Counter[str] = field(default_factory=Counter)
     alerts_open: Counter[str] = field(default_factory=Counter)
@@ -311,6 +310,7 @@ class _SendOrders:
 
 @dataclass(frozen=True, slots=True)
 class _Count:
+    day: date
     items: tuple[_Item, ...]
     client_id: UUID
 
@@ -640,7 +640,7 @@ class _Run:
         events.append(_Event(datetime.combine(day, venue.order_time), _SendOrders(day)))
         counted = tuple(item for item in self.items if item.spec.count_weekday == day.weekday())
         if counted:
-            count = _Count(counted, self._client_id())
+            count = _Count(day, counted, self._client_id())
             events.append(_Event(datetime.combine(day, venue.count_time), count))
         return events
 
@@ -818,7 +818,6 @@ class _Run:
             if days_past < EXPIRED_WASTE_BY_DAY and not self._chance(EXPIRED_WASTE_PER_MILLE):
                 continue
             self._waste(item, batch_id, on_hand, "expired", occurred_at, self._client_id())
-            self.summary.expired_by_sku[item.sku] += 1
 
     def _waste_expiring_today(self, day: date, occurred_at: datetime) -> None:
         """At closing, waste most of what expires today (D79).
@@ -832,7 +831,6 @@ class _Run:
             if expires_on != day or not self._chance(CLOSING_WASTE_PER_MILLE):
                 continue
             self._waste(item, batch_id, on_hand, "expired", occurred_at, self._client_id())
-            self.summary.expired_by_sku[item.sku] += 1
 
     def _alerted_batches(self, alert_type: str) -> list[tuple[_Item, UUID, date, Decimal]]:
         """The batches with an open alert of that type, with what they hold:
@@ -868,7 +866,7 @@ class _Run:
             batches = self._batches_with_stock(item)
             if not batches:
                 return
-            batch_id, on_hand = batches[self.rng.randrange(len(batches))]
+            batch_id, on_hand, _ = batches[self.rng.randrange(len(batches))]
         else:
             batch_id = None
             on_hand = self._default_on_hand(item)
@@ -879,11 +877,11 @@ class _Run:
             item, batch_id, quantity, item.spec.spoil_reason, occurred_at, spoilage.client_id
         )
 
-    def _batches_with_stock(self, item: _Item) -> list[tuple[UUID, Decimal]]:
-        """The item's received batches with stock on hand, as (batch id, on hand),
-        earliest expiry first."""
+    def _batches_with_stock(self, item: _Item) -> list[tuple[UUID, Decimal, date | None]]:
+        """The item's received batches with stock on hand, as (batch id, on hand,
+        expires on), earliest expiry first."""
         rows = self.session.execute(
-            select(Batch.id, StockBalance.qty_on_hand)
+            select(Batch.id, StockBalance.qty_on_hand, Batch.expires_on)
             .join(
                 StockBalance,
                 and_(
@@ -899,7 +897,7 @@ class _Run:
             )
             .order_by(Batch.expires_on.asc().nulls_last(), Batch.received_at)
         )
-        return [(batch_id, on_hand) for batch_id, on_hand in rows]
+        return [(batch_id, on_hand, expires_on) for batch_id, on_hand, expires_on in rows]
 
     def _default_on_hand(self, item: _Item) -> Decimal:
         """What the item's default batch holds; zero if it has none yet."""
@@ -1090,9 +1088,11 @@ class _Run:
         """Count the day's items: what the ledger holds, less what went unlogged.
 
         The loss is found in whole base units; the fraction of a unit carries
-        over to the next count. A batch-tracked item loses from its
-        earliest-expiring batches first, as usage draws them. Loss beyond what
-        the ledger holds is dropped: nothing more can be missing than was there.
+        over to the next count. A batch-tracked item loses from the batches
+        usage draws, earliest expiry first; batches already past their expiry
+        date come last, because usage skips them (hard rule 6) and only the
+        waste checks take them. Loss beyond what the ledger holds is dropped:
+        nothing more can be missing than was there.
         """
         counted = []
         for item in count.items:
@@ -1100,7 +1100,10 @@ class _Run:
             self.loss[item.sku] -= loss
             if item.spec.tracks_batches:
                 batches = []
-                for batch_id, on_hand in self._batches_with_stock(item):
+                stock = self._batches_with_stock(item)
+                expired = [b for b in stock if b[2] is not None and b[2] < count.day]
+                usable = [b for b in stock if b not in expired]
+                for batch_id, on_hand, _ in usable + expired:
                     gone = min(loss, on_hand)
                     loss -= gone
                     batches.append(BatchCountInput(batch_id, on_hand - gone))

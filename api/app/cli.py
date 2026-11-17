@@ -19,7 +19,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -94,6 +94,9 @@ def _positive_int(value: str) -> int:
 
 
 def reset(args: argparse.Namespace, session_factory: SessionFactory) -> int:
+    # Before the schema is recreated, so a refused run leaves the data as it was.
+    if _refuse_future_end_date(args, session_factory):
+        return 1
     url = make_url(get_settings().database_url)
     print(f"This erases every table in database {url.database!r} on {url.host}:{url.port}")
     print("and fills it with fresh demo data.")
@@ -118,7 +121,32 @@ def recreate_schema() -> None:
 # --- simulate -------------------------------------------------------------------
 
 
+def _refuse_future_end_date(args: argparse.Namespace, session_factory: SessionFactory) -> bool:
+    """Print why and return True if --end-date is after today in the café's timezone (D82).
+
+    simulate() refuses it too, but only once the business is seeded; checking
+    here first lets reset refuse before it erases anything.
+    """
+    if args.end_date is None:
+        return False
+    with session_factory() as session:
+        today = session.scalar(
+            text("SELECT (now() AT TIME ZONE CAST(:timezone AS text))::date"),
+            {"timezone": CAFE.timezone},
+        )
+    if args.end_date <= today:
+        return False
+    print(
+        f"Can't simulate: the end date {args.end_date} is in the future (today is {today}),"
+        " and a run never dates anything after the current time.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> int:
+    if _refuse_future_end_date(args, session_factory):
+        return 1
     with session_factory() as session:
         if session.scalar(select(Business.id).limit(1)) is not None:
             print("The database already has a business, so simulate won't add another.")
@@ -137,11 +165,6 @@ def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> i
         except SimulationError as exc:
             print(f"Simulation stopped: {exc}", file=sys.stderr)
             print("Days before the failed one are committed.", file=sys.stderr)
-            return 1
-        except ValueError as exc:
-            # Refused before the first day, so nothing is committed, the seed
-            # included: the session rolls back when it closes.
-            print(f"Can't simulate: {exc}", file=sys.stderr)
             return 1
     print(f"Simulated {CAFE.name}.")
     for line in format_summary(summary):
