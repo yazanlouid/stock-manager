@@ -82,7 +82,9 @@ class ItemSpec:
     # Base units used on an average day (weekday factor 1000).
     daily_usage: int
     # The par level, in base units (D76): reorder at or below reorder_point,
-    # up to order_up_to.
+    # up to order_up_to; low stock (a real shortage) at or below
+    # low_stock_level (D83).
+    low_stock_level: int
     reorder_point: int
     order_up_to: int
     # Chance the owner raises a line of this item by 30–70% when ordering.
@@ -152,6 +154,7 @@ def _item(
     supplier: str,
     daily_usage: int,
     *,
+    low_stock_days_per_mille: int,
     reorder_days_per_mille: int,
     order_up_to_days_per_mille: int,
     count_weekday: int,
@@ -167,6 +170,8 @@ def _item(
     """An ItemSpec, with its par level worked out from days of average usage.
 
     reorder_days_per_mille 2500 means "reorder at two and a half days of usage".
+    The low-stock level is below what is normally left just before a delivery
+    comes, so the alert means a late or short delivery or a busy day (D83).
     """
     return ItemSpec(
         sku=sku,
@@ -180,6 +185,7 @@ def _item(
         pack_price=Decimal(pack_price),
         supplier=supplier,
         daily_usage=daily_usage,
+        low_stock_level=daily_usage * low_stock_days_per_mille // 1000,
         reorder_point=daily_usage * reorder_days_per_mille // 1000,
         order_up_to=daily_usage * order_up_to_days_per_mille // 1000,
         over_order_per_mille=over_order_per_mille,
@@ -195,8 +201,10 @@ def _item(
 
 def _dairy(sku, name, base_unit, unit_name, factor, price, daily, shelf, **kw) -> ItemSpec:
     # Ordered most evenings for the next morning, with one two-day gap a week:
-    # reorder at 2.5 days, up to 3.5. A little over-pouring at the bar.
+    # reorder at 2.5 days, up to 3.5, low below 1 day. A little over-pouring
+    # at the bar.
     kw = {
+        "low_stock_days_per_mille": 1000,
         "reorder_days_per_mille": 2500,
         "order_up_to_days_per_mille": 3500,
         "count_weekday": SUN,
@@ -212,9 +220,11 @@ def _dairy(sku, name, base_unit, unit_name, factor, price, daily, shelf, **kw) -
 
 def _pastry(sku, name, unit_name, factor, price, daily, shelf, **kw) -> ItemSpec:
     # Ordered every evening for the next morning: reorder at just over a day,
-    # up to a day and a half, so a busy Friday still has enough. Now and then
-    # one is eaten without being logged.
+    # up to a day and a half, so a busy Friday still has enough; low below a
+    # third of a day, which a normal evening keeps. Now and then one is eaten
+    # without being logged.
     kw = {
+        "low_stock_days_per_mille": 330,
         "reorder_days_per_mille": 1150,
         "order_up_to_days_per_mille": 1550,
         "count_weekday": MON,
@@ -231,9 +241,10 @@ def _pastry(sku, name, unit_name, factor, price, daily, shelf, **kw) -> ItemSpec
 
 def _produce(sku, name, unit_name, factor, price, daily, shelf, **kw) -> ItemSpec:
     # Three orders a week, up to three days apart, and the longest gap is the
-    # busy weekend: reorder at 4 days, up to 4.8. Trimmings and bruised fruit
-    # go in the bin unlogged.
+    # busy weekend: reorder at 4 days, up to 4.8, low below 1.5. Trimmings and
+    # bruised fruit go in the bin unlogged.
     kw = {
+        "low_stock_days_per_mille": 1500,
         "reorder_days_per_mille": 4000,
         "order_up_to_days_per_mille": 4800,
         "count_weekday": WED,
@@ -248,9 +259,10 @@ def _produce(sku, name, unit_name, factor, price, daily, shelf, **kw) -> ItemSpe
 
 
 def _beans(sku, name, unit_name, factor, price, daily, **kw) -> ItemSpec:
-    # Two orders a week with two days' lead: reorder at 6.5 days, up to 9.5.
-    # Heavy-handed dosing, and the odd bag that walks.
+    # Two orders a week with two days' lead: reorder at 6.5 days, up to 9.5,
+    # low below 2.5. Heavy-handed dosing, and the odd bag that walks.
     kw = {
+        "low_stock_days_per_mille": 2500,
         "reorder_days_per_mille": 6500,
         "order_up_to_days_per_mille": 9500,
         "count_weekday": SAT,
@@ -263,9 +275,10 @@ def _beans(sku, name, unit_name, factor, price, daily, **kw) -> ItemSpec:
 
 
 def _dry(sku, name, base_unit, unit_name, factor, price, daily, **kw) -> ItemSpec:
-    # One order a week with three days' lead: reorder at 11.5 days, up to 18.
-    # Syrups and sauces are poured generously.
+    # One order a week with three days' lead: reorder at 11.5 days, up to 18,
+    # low below 4. Syrups and sauces are poured generously.
     kw = {
+        "low_stock_days_per_mille": 4000,
         "reorder_days_per_mille": 11500,
         "order_up_to_days_per_mille": 18000,
         "count_weekday": THU,
@@ -281,6 +294,7 @@ def _packaging(sku, name, unit_name, factor, price, daily, **kw) -> ItemSpec:
     # One order a week with three days' lead, like dry goods. Double-cupping
     # and dropped lids aren't logged.
     kw = {
+        "low_stock_days_per_mille": 4000,
         "reorder_days_per_mille": 11500,
         "order_up_to_days_per_mille": 18000,
         "count_weekday": TUE,

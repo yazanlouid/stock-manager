@@ -97,6 +97,7 @@ def seed(session: Session, venue: Venue = CAFE) -> UUID:
                 business_id=business_id,
                 location_id=location.id,
                 item_id=item.id,
+                low_stock_level=Decimal(spec.low_stock_level),
                 reorder_point=Decimal(spec.reorder_point),
                 order_up_to=Decimal(spec.order_up_to),
             )
