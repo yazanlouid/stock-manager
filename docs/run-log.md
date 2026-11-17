@@ -5,17 +5,19 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 4, step 3 (plan update for D82 and D83), then step 4 (build)
-- Branch and PR: feat/sim-week2, no PR yet; run/week-2 (with D83) merged into it
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4's decisions D76–D81, plan and simulator rewrite in progress (adfc8bf, tests not yet updated)
-- Next: update task 4's plan for D82 and D83, then build it
-- Next decision ID: D85 (task 4's details row)
-- Updated: 2026-11-17 12:28
+- Task and step: task 4, step 6 (PR)
+- Branch and PR: feat/sim-week2, no PR yet
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 built and checked
+- Next: open task 4's PR, review, CI, merge; then task 5
+- Next decision ID: D86
+- Updated: 2026-11-17 12:44
 
 ## For Yazan (look at these first)
 
 - **Answered by Yazan (D82): the last day stops at the current time.** Built in task 4. What I wrote: **The last day and now() (D78): I kept D41 and propose changing it.** D41 says the last simulated day runs in full, even past the current time. With night counts that would stop API writes for the counted items until tonight, so the simulator doesn't count on its last day. The older problem remains: after a reset during the day, the API can't count an item until tomorrow, because movements dated later today already exist (D51). The fix is to stop the last day at the current time, which changes D41, so it is yours to decide; the plan mentions it as brought forward from week 3.
 - **Answered by Yazan (D83): low stock has its own level.** Built in PR #12 (D84), and the café's levels come in task 4. What I wrote: **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
+- **Review: an end date in the future is now refused (D85).** D82 says a reset leaves nothing dated in the future; a future end date would do exactly that, so simulate() refuses it before writing anything. It is a small addition to D82, easy to drop.
+- **Review: the closing check (D85).** At closing the simulated owner wastes, with an 80% chance each, the batches that expire that day. Without it, tonight's drafts counted stock that can't be sold tomorrow and ordered short. It makes expired alerts rare in the café (4 in 30 days), though every kind still shows.
 - **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
@@ -30,6 +32,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 - (Task 4) The owner places orders after closing, and deliveries come the morning of the delivery day, so a lead time of one day costs no day of usage (D76). The docs give lead times in days only.
 - (Task 4) The par levels in days per kind of item, the over-portioning shares, the theft chances, the short-delivery chances and the count weekdays are my numbers, chosen so that a month of café data shows every kind of alert and a few shortfalls without looking broken (D76 to D78).
+- (Task 4) The low-stock levels in days per kind of item (D85: dairy 1, pastry 0.33, produce 1.5, beans 2.5, dry goods and packaging 4) are my numbers: below what is normally left just before a delivery, so the alert means a late or short delivery or a busy day (D83).
 - (Task 4) A short delivery brings 40 to 80% of each line; a late one keeps the expiry date of its planned day (D77).
 - (Task 4) Demand isn't capped by what is in stock: usage is logged as demanded, as in week 1, and runs short when a delivery is late or short. Unlogged loss only shows at a count.
 - (Task 3) A supplier delivers an order in one go: one receipt closes it, and whatever was short goes on the next draft (D71). The docs don't say whether deliveries can be split.
@@ -150,9 +153,19 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   5. Docs: CLAUDE.md (commands, milestone text stays for task 7), README, `docs/schema.md` rule 10's sweep sentence, D85.
   - Updated on 17 Nov after Yazan's D82 and D83, before the build was finished; the work in progress (adfc8bf) had kept D41's full last day and D78's rule.
 - Decisions: D76 par levels as venue data and opening stock; D77 how the owner orders, late, short and cancelled deliveries; D78 shrinkage, weekly counts (its last-day rule replaced by Yazan's D82); D79 the daily sweep and expired waste from alerts; D80 reversals never cross a count; D81 the summary and gate 1's test. Yazan's D82 (the last day stops at the current time) and D83 (low-stock levels, here as venue data). Details row: D85.
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
+- Checks:
+  - `uv run pytest`: 552 passed in 160.1 s (549 after D83). Gate 1's test 45.2 s (43.0 s after task 3's fixes, 49.4 s alone on D83's branch this morning), the property machine 46.9 s, the determinism test 21.6 s (24.1 s; 7 days, now also comparing alerts, orders and counts), the D82 cutoff test 6.0 s.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 67 files.
+  - No migration in this task.
+  - `reset --end-date 2026-10-31`: 46 s. Orders sent 83, received 78, cancelled 0 (now: 3 drafts, 5 sent); receipts 84 (2 late, 8 short); movements count_adjust 157, receive 417, reversal 76, settle 46, usage 2776, waste 42; waste by reason damaged 3, expired 16, spoiled 23; shortfalls 26; settle pairs 23; reversals 53; counts 25 (157 lines with a variance); alerts raised expired 4, expiring 144, low_stock 142, negative_stock 29; open at the end expiring 3, low_stock 5. Changed from the baseline by design (D52).
+  - `reset` with no end date (D82): the 30 days up to 17 Nov, stopped at 12:43 UTC; nothing in movements, counts, alerts or orders is dated after the current time.
+  - reconcile: Dar Zaatar Café OK after both.
+  - `git diff --check run/week-2...HEAD`: nothing.
 - Review: findings and what was done
 - Notes:
+  - Low-stock alerts in the 30 days went from 440 (at the reorder point, the work in progress before D83) to 142. About 40 are day 0's: the first sweep finds every item empty before its opening delivery. Most of the rest open in the evening after a busy day, or after a late or short delivery, and close with the next morning's delivery.
+  - Pastries run short most often (shortfalls on busy Fridays and Saturdays, and when a daily delivery is late). Demand isn't capped by stock, so a late delivery shows as a shortfall rather than lost sales (Assumptions).
+  - The interrupted session left the simulator rewrite uncommitted; it was committed as work in progress (adfc8bf), and the D82 and D83 changes follow it as their own commits.
 
 ### Task 5: the sweets shop and the cloud kitchen
 
