@@ -5,7 +5,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: D83 (the low-stock level), step 4 (build); task 4 paused at step 4
+- Task and step: D83 (the low-stock level), step 6 (PR); task 4 paused at step 4
 - Branch and PR: feat/low-stock-level, no PR yet; task 4's work in progress is saved on feat/sim-week2 (adfc8bf)
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); task 4's decisions D76–D81, plan and simulator rewrite (untested, on feat/sim-week2); Yazan's D82 and D83 added
 - Next: build D83 in the commit order of its plan below; then merge run/week-2 into feat/sim-week2 (no rebase), update task 4's plan for D82 and D83, and build task 4
@@ -119,6 +119,15 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   3. Property machine: each par level gets a low-stock level below its reorder point, and the Python evaluation of low stock uses it, so the machine covers the band where a line is due and no alert is.
   4. Docs: `docs/schema.md` (par_levels, rules 8 and 10, checks), the D84 details row.
 - Decisions: D84 (details): the column's name, required, the backfill, and what an item without one does.
+- Checks:
+  - `uv run pytest`: 548 passed in 187.3 s (546 after task 3). Gate 1's test 56.0 s in the full run and 49.4 s alone (43.0 s after task 3's fixes); the property machine 52.1 s (43.8 s). This branch can't change gate 1's work: the simulator sets no par levels until task 4, so the low-stock condition never matches there, and the reset's time (48 s against 49.7 s) agrees. The machine is slower today, as on 15 Nov; the property machine also walks a new band now.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 67 files.
+  - Migration round trip on the dev database (upgrade, downgrade -1, upgrade): `6f33477b5349 -> 7a9b465f4743` each way; the 40 par-level rows task 4's work in progress had seeded took their reorder points.
+  - `reset --end-date 2026-10-31`: 48 s; receipts 89 (5 late), receive 555, reversal 72, settle 16, usage 2790, waste 64, shortfalls 9, settle pairs 8, reversals 44: identical to the baseline.
+  - reconcile: Dar Zaatar Café OK.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Notes:
+  - A mutation check on the property machine (the alerts query back on reorder_point) was caught, after Hypothesis shrank it for five minutes.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
