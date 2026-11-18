@@ -5,8 +5,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 5, step 6 (PR)
-- Branch and PR: feat/venues, no PR yet
+- Task and step: task 5, step 8 (CI and merge)
+- Branch and PR: feat/venues, PR #14
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5's decisions D86–D88 and plan
 - Next: build task 5 in the commit order of its plan below
 - Next decision ID: D90
@@ -178,7 +178,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 5: the sweets shop and the cloud kitchen
 
-- Branch, PR, merge commit: feat/venues
+- Branch, PR, merge commit: feat/venues, PR #14
 - Plan:
   1. Move the venue dataclasses, weekday constants and the item constructor from `app/sim/cafe.py` to `app/sim/venue.py` (no behaviour change; the café's data stays in `cafe.py`).
   2. `app/sim/sweets.py` (SWEETS) and `app/sim/kitchen.py` (KITCHEN), and `app/sim/venues.py` with VENUES in run order. Tune each with a 30- and a 90-day run until it raises every kind of alert, sends and receives orders and has a few shortfalls without looking broken.
@@ -194,7 +194,10 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - `reset --days 90 --end-date 2026-10-31` (3 × 90 days): 349 s. Café: orders sent 254, received 248, cancelled 1; receipts 254 (14 late, 6 short); shortfalls 116; counts 77 (466 lines with a variance); alerts raised expired 14, expiring 449, low_stock 378, negative_stock 81. Sweets: orders sent 216, received 214; receipts 219 (12 late, 11 short); shortfalls 32; counts 64 (340); alerts raised expiring 130, low_stock 180, negative_stock 33. Kitchen: orders sent 263, received 259, cancelled 1; receipts 265 (18 late, 14 short); shortfalls 55; counts 77 (368); alerts raised expired 5, expiring 529, low_stock 268, negative_stock 63.
   - reconcile: all three OK after both resets.
   - `git diff --check run/week-2...HEAD`: nothing.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #14, three findings, all fixed.
+  1. Without --end-date, each venue ends today in its own timezone, so for an hour each evening the Dubai kitchen ends a day after the Amman venues, unlike D87's "same end date". That follows D82, so the behaviour stays; D87 and the CLI now say so.
+  2. Determinism was tested only for the café. The test now runs the café and the kitchen (another timezone), 5 days each, in the same total time (24.4 s against 23.6 s).
+  3. `ItemSpec.pack_price`'s comment said JOD; it now says the venue's currency.
 - Notes:
   - The sweets shop raises no expired alerts, even in 90 days: the closing check wastes its cheese and dough on their expiry day, and its other goods keep for weeks or have no expiry. The café and the kitchen cover the expired path, which gate 2 checks across the three venues.
   - The CLI's default stays at 30 days (D89): 3 × 90 days take about six minutes here.
