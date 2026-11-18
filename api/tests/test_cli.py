@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app import cli
 from app.config import get_settings
 from app.models import Business
+from app.sim.venues import VENUES
 from tests.builders import Catalogue, add, new_balance, new_batch
 
 
@@ -87,17 +88,29 @@ def test_simulate_refuses_a_database_that_already_has_a_business(
     assert db_session.scalar(select(func.count()).select_from(Business)) == 1
 
 
-def test_simulate_seeds_simulates_and_reconciles(session_factory, db_session: Session, capsys):
-    args = ["simulate", "--days", "1", "--end-date", "2026-10-31"]
+def test_simulate_seeds_simulates_and_reconciles_the_three_venues(
+    session_factory, db_session: Session, capsys
+):
+    args = ["simulate", "--days", "1", "--end-date", "2026-10-31", "--random-seed", "100"]
     assert cli.main(args, session_factory) == 0
 
     out = capsys.readouterr().out
-    assert "Days: 1, 2026-10-31 to 2026-10-31 (opening stock on 2026-10-30)" in out
-    assert "Orders: sent " in out and "Alerts raised: " in out
-    (movements,) = [line for line in out.splitlines() if line.startswith("Movements: ")]
-    assert "receive " in movements
-    business_id = db_session.scalar(select(Business.id))
-    assert f"Reconcile Dar Zaatar Café ({business_id}): OK" in out
+    # In run order, each with the run's seed plus its position (D87).
+    simulated = [line for line in out.splitlines() if line.startswith("Simulated ")]
+    assert simulated == [f"Simulated {venue.name}." for venue in VENUES]
+    days = [line for line in out.splitlines() if line.startswith("Days: ")]
+    assert days == [
+        f"Days: 1, 2026-10-31 to 2026-10-31 (opening stock on 2026-10-30), random seed {seed}"
+        for seed in (100, 101, 102)
+    ]
+    assert out.count("Orders: sent ") == 3 and out.count("Alerts raised: ") == 3
+    for line in out.splitlines():
+        if line.startswith("Movements: "):
+            assert "receive " in line
+    businesses = db_session.execute(select(Business.id, Business.name)).all()
+    assert sorted(name for _, name in businesses) == sorted(venue.name for venue in VENUES)
+    for business_id, name in businesses:
+        assert f"Reconcile {name} ({business_id}): OK" in out
 
 
 def test_simulate_refuses_an_end_date_in_the_future_and_leaves_nothing(
