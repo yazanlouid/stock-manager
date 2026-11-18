@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 6, step 8 (CI and merge)
-- Branch and PR: feat/item-setup, PR #15
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6's decisions D90–D94 and plan
-- Next: build task 6 in the commit order of its plan below
-- Next decision ID: D96
-- Updated: 2026-11-18 12:41
+- Task and step: task 7, step 4 (build)
+- Branch and PR: feat/gate-2, no PR yet
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6 merged as 9b13074 (PR #15); task 7's plan
+- Next: build task 7 in the commit order of its plan below, then the final step
+- Next decision ID: D96 (task 7's details row)
+- Updated: 2026-11-18 13:07
 
 ## For Yazan (look at these first)
 
@@ -206,7 +206,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 6: the item setup API
 
-- Branch, PR, merge commit: feat/item-setup, PR #15
+- Branch, PR, merge commit: feat/item-setup, PR #15, merged into run/week-2 as 9b13074 (CI 1m49s)
 - Plan:
   1. `app/domain/items.py`: create_item, update_item, add_unit, rename_unit, set_supplier_price, remove_supplier_price, set_par_level, remove_par_level. Each locks the business row (orders.py's lock, made public as lock_business), checks, writes, and re-evaluates through evaluate_rules where D92 says. Worked examples in `tests/test_items.py`, each ending with reconcile's alert and draft-line checks.
   2. Property machine: a rule that changes a par level, so the alerts and draft-lines invariants cover re-evaluation by setup.
@@ -233,9 +233,14 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 7: gate 2 housekeeping
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/gate-2
 - Plan:
-- Decisions:
+  1. `docs/decisions.md`: Last updated; D81's status (its gate 1 checks moved to gate 2's test by D88); the Open section (still none); D96, the gate.
+  2. CLAUDE.md: the Current milestone for week 3 (dashboard), from the spec's milestone row and user stories U5–U11, with gate 3 ("Demo script runs in the browser"); commands and hard rules checked against the code. The temporary run section stays until the final step.
+  3. `docs/schema.md`: Last updated, and a check that the rules intro and every section match the code.
+  4. README: the Status section describes week 2.
+  5. Gate 2 evidence, in the PR and here: `reset --days 90 --end-date 2026-10-31` and reconcile, alerts and draft orders per venue, the test count and suite time, and CI's time.
+- Decisions: none new beyond D96, the gate and its evidence.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
@@ -270,3 +275,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-18 12:14: task 5 started on feat/venues.
 - 2026-11-18 12:38: PR #14 green (CI 2m0s) and squash-merged into run/week-2 as 102b96c.
 - 2026-11-18 12:41: task 6 started on feat/item-setup.
+- 2026-11-18 13:06: PR #15 green (CI 1m49s) and squash-merged into run/week-2 as 9b13074.
+- 2026-11-18 13:07: task 7 started on feat/gate-2.
