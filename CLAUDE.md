@@ -93,16 +93,18 @@ docker-compose.yml   db now; api and web services in week 4
 
 ## Current milestone
 
-Week 2 (rules and simulator). Week 1 (ledger core) passed gate 1: 30 simulated café days reconcile exactly with the ledger, and CI is green. No UI work yet; the dashboard is week 3.
+Week 3 (dashboard). Week 2 (rules and simulator) passed gate 2: the simulator raises alerts and draft orders on its own for a café, a sweets shop and a cloud kitchen, each venue reconciles after 90 days, and CI is green. Week 1 passed gate 1 (30 café days reconcile exactly).
 
-Week 2 scope:
+Week 3 scope:
 
-- Migrations: stock_counts and stock_count_lines (stock_count_line_id joins stock_movements the same way as receipt_line_id, D28), par_levels, purchase_orders and purchase_order_lines (po_id joins receipts, D30), and alerts
-- Stock counts per location, with variances posted as count_adjust movements, and an API to submit them (U3)
-- Par levels, and alerts: low stock, expiring within N days (U6), expired on hand and negative stock
-- Draft orders: one open draft per supplier and location, filled from par levels and rounded up to whole packs (domain rule 8, U7)
-- Item setup API: units, packs, tracking and par levels (U10)
-- Full simulator: a café, a sweets shop and a cloud kitchen, 90 days each, still writing only through the domain functions (U12)
-- Spare time goes to hardening week 1, not to new scope
+- A React + TypeScript + Vite dashboard in `web/`, on the API
+- Stock: on-hand by item, location and batch, with expiry dates (U5)
+- Alerts: low stock, expiring, expired and negative stock (U6), on GET /alerts
+- Orders: each supplier's draft, editing, sending and receiving against it (U7), on the orders endpoints
+- Waste by reason and value for any period (U8), and count variance by item (U9), with the read endpoints they need
+- Item setup: units, packs, tracking, supplier prices and par levels (U10), on the week 2 item setup API
+- Expiry log: what expired, when and what was done with it (U11)
+- Demo login with owner and staff roles (the spec's tenancy and access), replacing the X-Business-Id header (D43), and CORS for the dashboard
+- Spare time goes to hardening weeks 1 and 2, not to new scope
 
-Gate: the simulator raises alerts and draft orders on its own, every venue still reconciles, and CI is green. Update this section at each gate.
+Gate: the demo script runs in the browser. Update this section at each gate.

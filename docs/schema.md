@@ -1,6 +1,6 @@
 # Perishable Stock Manager — Core Schema
 
-Author: Yazan Louid · Last updated: 17 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
+Author: Yazan Louid · Last updated: 18 Nov 2026 · Related: [spec.md](spec.md), [decisions.md](decisions.md)
 
 ## Design principles
 

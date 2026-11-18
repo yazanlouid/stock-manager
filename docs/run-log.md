@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 6, step 8 (CI and merge)
-- Branch and PR: feat/item-setup, PR #15
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6's decisions D90–D94 and plan
-- Next: build task 6 in the commit order of its plan below
-- Next decision ID: D96
-- Updated: 2026-11-18 12:41
+- Task and step: task 7, step 8 (CI and merge)
+- Branch and PR: feat/gate-2, PR #16
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6 merged as 9b13074 (PR #15); task 7's plan
+- Next: build task 7 in the commit order of its plan below, then the final step
+- Next decision ID: D97
+- Updated: 2026-11-18 13:07
 
 ## For Yazan (look at these first)
 
@@ -34,6 +34,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ## Assumptions
 
+- (Task 7) Week 3's scope in CLAUDE.md includes demo login with owner and staff roles, and CORS, because the dashboard needs them; the spec's milestone row names only the screens, and D43 says the header lasts "until demo login". It also names the read endpoints that waste-by-reason and count-variance screens will need.
 - (Task 4) The owner places orders after closing, and deliveries come the morning of the delivery day, so a lead time of one day costs no day of usage (D76). The docs give lead times in days only.
 - (Task 4) The par levels in days per kind of item, the over-portioning shares, the theft chances, the short-delivery chances and the count weekdays are my numbers, chosen so that a month of café data shows every kind of alert and a few shortfalls without looking broken (D76 to D78).
 - (Task 5) Everything about the sweets shop and the cloud kitchen is my invention (D86): what they buy, from whom, pack sizes, prices (the kitchen's in AED), usage, opening hours, busy days, shelf lives, par and low-stock levels, shrinkage and supplier reliability. The docs only name the three verticals.
@@ -206,7 +207,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 6: the item setup API
 
-- Branch, PR, merge commit: feat/item-setup, PR #15
+- Branch, PR, merge commit: feat/item-setup, PR #15, merged into run/week-2 as 9b13074 (CI 1m49s)
 - Plan:
   1. `app/domain/items.py`: create_item, update_item, add_unit, rename_unit, set_supplier_price, remove_supplier_price, set_par_level, remove_par_level. Each locks the business row (orders.py's lock, made public as lock_business), checks, writes, and re-evaluates through evaluate_rules where D92 says. Worked examples in `tests/test_items.py`, each ending with reconcile's alert and draft-line checks.
   2. Property machine: a rule that changes a par level, so the alerts and draft-lines invariants cover re-evaluation by setup.
@@ -233,12 +234,34 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 7: gate 2 housekeeping
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/gate-2, PR #16
 - Plan:
-- Decisions:
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
-- Review: findings and what was done
+  1. `docs/decisions.md`: Last updated; D81's status (its gate 1 checks moved to gate 2's test by D88); the Open section (still none); D96, the gate.
+  2. CLAUDE.md: the Current milestone for week 3 (dashboard), from the spec's milestone row and user stories U5–U11, with gate 3 ("Demo script runs in the browser"); commands and hard rules checked against the code. The temporary run section stays until the final step.
+  3. `docs/schema.md`: Last updated, and a check that the rules intro and every section match the code.
+  4. README: the Status section describes week 2.
+  5. Gate 2 evidence, in the PR and here: `reset --days 90 --end-date 2026-10-31` and reconcile, alerts and draft orders per venue, the test count and suite time, and CI's time.
+- Decisions: none new beyond D96, the gate and its evidence.
+- Checks:
+  - `uv run pytest`: 599 passed in 168.0 s (366 at the baseline, 593 before task 6's review fixes). Gate 2's test 48.4 s, the property machine 37.7 s, the determinism tests 19.2 s (café) and about 10 s (kitchen). CI took 1m49s on PR #15.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 75 files.
+  - No migration in this task.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Gate 2 evidence: `reset --days 90 --end-date 2026-10-31`, 307 s, identical to the run in task 5.
+
+  | Venue | Orders sent / received / cancelled | Receipts (late, short) | Movements | Count lines with a variance | Alerts raised (expired / expiring / low_stock / negative_stock) | Open at the end | Drafts waiting |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | Dar Zaatar Café | 254 / 248 / 1 | 254 (14, 6) | 10,534 | 466 | 922 (14 / 449 / 378 / 81) | 9 | 3 |
+  | Sukkar & Semsem Sweets | 216 / 214 / 0 | 219 (12, 11) | 6,646 | 340 | 343 (0 / 130 / 180 / 33) | 2 | 3 |
+  | Sahtein Cloud Kitchen | 263 / 259 / 1 | 265 (18, 14) | 7,272 | 368 | 865 (5 / 529 / 268 / 63) | 12 | 4 |
+
+  reconcile: Dar Zaatar Café OK, Sahtein Cloud Kitchen OK, Sukkar & Semsem Sweets OK.
+- Review: `/code-review` at high effort on PR #16, three findings, all fixed.
+  1. The README said both gates pass in CI; CI runs gate 2's 14-day test, and the 90-day reconcile is reset's evidence. It now says so.
+  2. D96 said CI runs in under 2 minutes; PR #14's took 2m0s. It now says about 2 minutes.
+  3. D96 used Markdown backticks in a plain-text log row; removed.
 - Notes:
+  - The 3 × 90 run uses the CLI's seeds (20261110, +1, +2) and leaves the dev database with the full demo.
 
 ## Timeline
 
@@ -270,3 +293,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-18 12:14: task 5 started on feat/venues.
 - 2026-11-18 12:38: PR #14 green (CI 2m0s) and squash-merged into run/week-2 as 102b96c.
 - 2026-11-18 12:41: task 6 started on feat/item-setup.
+- 2026-11-18 13:06: PR #15 green (CI 1m49s) and squash-merged into run/week-2 as 9b13074.
+- 2026-11-18 13:07: task 7 started on feat/gate-2.
