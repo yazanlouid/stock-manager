@@ -196,3 +196,41 @@ def make_item(
         theft_max_per_mille=theft_max_per_mille,
         count_weekday=count_weekday,
     )
+
+
+def item_kind(category: str, base_unit: str, tracking: str, supplier: str, **defaults):
+    """A constructor for one kind of item at a venue: every item of the kind
+    shares its category, supplier, par-level days, count day and shrinkage,
+    and any of them can be overridden per item (base_unit and tracking too).
+
+    The constructor takes (sku, name, unit_name, factor_to_base, pack_price,
+    daily_usage, shelf_life_days=None, **overrides).
+    """
+
+    def build(
+        sku: str,
+        name: str,
+        unit_name: str,
+        factor_to_base: int,
+        pack_price: str,
+        daily_usage: int,
+        shelf_life_days: int | None = None,
+        **overrides,
+    ) -> ItemSpec:
+        options = {"base_unit": base_unit, "tracking": tracking} | defaults | overrides
+        return make_item(
+            sku,
+            name,
+            category,
+            options.pop("base_unit"),
+            options.pop("tracking"),
+            unit_name,
+            factor_to_base,
+            pack_price,
+            supplier,
+            daily_usage,
+            shelf_life_days=shelf_life_days,
+            **options,
+        )
+
+    return build
