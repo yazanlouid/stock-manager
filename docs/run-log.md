@@ -5,8 +5,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 7, step 6 (PR)
-- Branch and PR: feat/gate-2, no PR yet
+- Task and step: task 7, step 8 (CI and merge)
+- Branch and PR: feat/gate-2, PR #16
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6 merged as 9b13074 (PR #15); task 7's plan
 - Next: build task 7 in the commit order of its plan below, then the final step
 - Next decision ID: D97
@@ -234,7 +234,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 7: gate 2 housekeeping
 
-- Branch, PR, merge commit: feat/gate-2
+- Branch, PR, merge commit: feat/gate-2, PR #16
 - Plan:
   1. `docs/decisions.md`: Last updated; D81's status (its gate 1 checks moved to gate 2's test by D88); the Open section (still none); D96, the gate.
   2. CLAUDE.md: the Current milestone for week 3 (dashboard), from the spec's milestone row and user stories U5–U11, with gate 3 ("Demo script runs in the browser"); commands and hard rules checked against the code. The temporary run section stays until the final step.
@@ -256,7 +256,10 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   | Sahtein Cloud Kitchen | 263 / 259 / 1 | 265 (18, 14) | 7,272 | 368 | 865 (5 / 529 / 268 / 63) | 12 | 4 |
 
   reconcile: Dar Zaatar Café OK, Sahtein Cloud Kitchen OK, Sukkar & Semsem Sweets OK.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #16, three findings, all fixed.
+  1. The README said both gates pass in CI; CI runs gate 2's 14-day test, and the 90-day reconcile is reset's evidence. It now says so.
+  2. D96 said CI runs in under 2 minutes; PR #14's took 2m0s. It now says about 2 minutes.
+  3. D96 used Markdown backticks in a plain-text log row; removed.
 - Notes:
   - The 3 × 90 run uses the CLI's seeds (20261110, +1, +2) and leaves the dev database with the full demo.
 

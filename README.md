@@ -6,7 +6,7 @@ The scope, data model and decisions live in [docs/](docs/): [spec.md](docs/spec.
 
 ## Status
 
-Weeks 1 and 2 of four are done, and both gates pass in CI: the ledger reconciles exactly, and the simulator raises alerts and draft orders on its own for three venues.
+Weeks 1 and 2 of four are done, and both gates pass: the ledger reconciles exactly, and the simulator raises alerts and draft orders on its own for three venues, each reconciling after 90 days. CI runs the gate test for 14 days per venue.
 
 - **Ledger:** append-only stock movements with batches, expiry dates and an on-hand projection that rebuilds from the ledger. Receive, use (earliest-expiring stock first, skipping expired batches), waste, reverse and count run as domain functions on Postgres, with property-based tests for the ledger rules.
 - **Rules:** stock counts that post their differences and act as a barrier for backdated writes; par levels with a low-stock level, a reorder point and an order-up-to level; alerts for low stock, expiring and expired batches and negative stock, kept in step with every stock write; and one draft order per supplier, filled from the par levels in whole packs, which the owner can edit, send, cancel and receive against.
