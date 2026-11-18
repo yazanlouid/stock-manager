@@ -1,12 +1,12 @@
 # Run log: week 2 run (D58)
 
-Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: a draft from run/week-2 into main, opened after this log's last commit.
+Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: draft PR #17 from run/week-2 into main, https://github.com/yazanlouid/stock-manager/pull/17.
 
 ## Resume point
 
 - Status: Complete
 - Task and step: the final step, done: CLAUDE.md's run section removed, this log finished, the draft PR into main opened
-- Branch and PR: run/week-2, the draft PR into main (not to be merged or marked ready by Claude Code)
+- Branch and PR: run/week-2, draft PR #17 into main (not to be merged or marked ready by Claude Code)
 - Done: step 0 (30a3a2c); task 2 (PR #10, 464444a); task 3 (PR #11, 66e388c); D83 (PR #12, c22a57d); task 4 (PR #13, 6af1d9a); task 5 (PR #14, 102b96c); task 6 (PR #15, 9b13074); task 7 (PR #16, 5c2ddd8)
 - Not done: the optional hardening PRs (feat/receipt-line-location, feat/write-lookups); see For Yazan
 - Next decision ID: D97
@@ -307,3 +307,4 @@ Most important first. Decisions marked "to review" in docs/decisions.md are the 
 - 2026-11-18 13:07: task 7 started on feat/gate-2.
 - 2026-11-18 13:19: PR #16 green (CI 1m27s) and squash-merged into run/week-2 as 5c2ddd8. I left the optional hardening PRs undone.
 - 2026-11-18 13:19: final step: CLAUDE.md's run section removed and this log finished, committed to run/week-2; the draft PR into main follows.
+- 2026-11-18 13:27: draft PR #17 opened from run/week-2 into main.
