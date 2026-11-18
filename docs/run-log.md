@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 5, step 8 (CI and merge)
-- Branch and PR: feat/venues, PR #14
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5's decisions D86–D88 and plan
-- Next: build task 5 in the commit order of its plan below
-- Next decision ID: D90
-- Updated: 2026-11-18 12:14
+- Task and step: task 6, step 4 (build)
+- Branch and PR: feat/item-setup, no PR yet
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6's decisions D90–D94 and plan
+- Next: build task 6 in the commit order of its plan below
+- Next decision ID: D95 (task 6's details row)
+- Updated: 2026-11-18 12:41
 
 ## For Yazan (look at these first)
 
@@ -178,7 +178,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 5: the sweets shop and the cloud kitchen
 
-- Branch, PR, merge commit: feat/venues, PR #14
+- Branch, PR, merge commit: feat/venues, PR #14, merged into run/week-2 as 102b96c (CI 2m0s)
 - Plan:
   1. Move the venue dataclasses, weekday constants and the item constructor from `app/sim/cafe.py` to `app/sim/venue.py` (no behaviour change; the café's data stays in `cafe.py`).
   2. `app/sim/sweets.py` (SWEETS) and `app/sim/kitchen.py` (KITCHEN), and `app/sim/venues.py` with VENUES in run order. Tune each with a 30- and a 90-day run until it raises every kind of alert, sends and receives orders and has a few shortfalls without looking broken.
@@ -204,9 +204,13 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 6: the item setup API
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/item-setup
 - Plan:
-- Decisions:
+  1. `app/domain/items.py`: create_item, update_item, add_unit, rename_unit, set_supplier_price, remove_supplier_price, set_par_level, remove_par_level. Each locks the business row (orders.py's lock, made public as lock_business), checks, writes, and re-evaluates through evaluate_rules where D92 says. Worked examples in `tests/test_items.py`, each ending with reconcile's alert and draft-line checks.
+  2. Property machine: a rule that changes a par level, so the alerts and draft-lines invariants cover re-evaluation by setup.
+  3. API: `app/api/items.py` and its schemas (D90). Tests in `tests/test_api_items.py`.
+  4. Docs: `docs/schema.md` (rule 10's list of what re-evaluates; the setup rules), README endpoint list, D95.
+- Decisions: D90 endpoints; D91 what can't change once used; D92 rules follow setup, with the business lock; D93 deactivation; D94 supplier prices, preferred, no client_id.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
@@ -248,3 +252,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-18 12:11: resumed in the same session after Yazan's "Try again" (model unchanged: Claude Opus 5.5). Postgres had exited (code 0) about 12 hours earlier; `docker compose up -d db` brought it back.
 - 2026-11-18 12:13: PR #13 squash-merged into run/week-2 as 6af1d9a (CI 1m40s).
 - 2026-11-18 12:14: task 5 started on feat/venues.
+- 2026-11-18 12:38: PR #14 green (CI 2m0s) and squash-merged into run/week-2 as 102b96c.
+- 2026-11-18 12:41: task 6 started on feat/item-setup.
