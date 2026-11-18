@@ -60,7 +60,7 @@ def set_line_quantity(
         if qty_packs > MAX_ORDER_PACKS:
             raise DomainError(f"qty_packs must be at most {MAX_ORDER_PACKS}, got {qty_packs}")
 
-    _lock_business(session, business_id)
+    lock_business(session, business_id)
     order = _get_order(session, business_id, order_id)
     _check_status(order, "draft", "its lines can't be changed")
     line = session.scalar(
@@ -88,7 +88,7 @@ def send_order(
     was cut short of its need, or dropped, goes straight onto a new draft.
     """
     check_timestamp(sent_at, "sent_at")
-    _lock_business(session, business_id)
+    lock_business(session, business_id)
     order = _get_order(session, business_id, order_id)
     _check_status(order, "draft", "it can't be sent")
     lines = _lines(session, business_id, order.id)
@@ -119,7 +119,7 @@ def cancel_order(
     would raise it again: set a line to 0 packs to leave an item out.
     """
     check_timestamp(cancelled_at, "cancelled_at")
-    _lock_business(session, business_id)
+    lock_business(session, business_id)
     order = _get_order(session, business_id, order_id)
     _check_status(order, "sent", "it can't be cancelled")
     order.status = "cancelled"
@@ -135,7 +135,7 @@ def cancel_order(
 # --- Checks and lookups ---------------------------------------------------------
 
 
-def _lock_business(session: Session, business_id: UUID) -> None:
+def lock_business(session: Session, business_id: UUID) -> None:
     """Keep stock writes and other order actions out until this transaction ends.
 
     FOR NO KEY UPDATE is the lock an UPDATE of the row takes: it conflicts
