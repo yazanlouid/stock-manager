@@ -5,11 +5,11 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 6, step 4 (build)
+- Task and step: task 6, step 6 (PR)
 - Branch and PR: feat/item-setup, no PR yet
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6's decisions D90–D94 and plan
 - Next: build task 6 in the commit order of its plan below
-- Next decision ID: D95 (task 6's details row)
+- Next decision ID: D96
 - Updated: 2026-11-18 12:41
 
 ## For Yazan (look at these first)
@@ -20,6 +20,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - **Review: the closing check (D85).** At closing the simulated owner wastes, with an 80% chance each, the batches that expire that day. Without it, tonight's drafts counted stock that can't be sold tomorrow and ordered short. It makes expired alerts rare in the café (4 in 30 days), though every kind still shows.
 - **The CLI's default is 30 days, not 90 (D89).** The spec's demo is 3 × 90 days, which takes about six minutes here, so every reset would; `--days 90` gives it. Changing the default is one line.
 - **Gate 1's test is gone, folded into gate 2's (D88).** Every path it checked is still checked, across the three venues for 14 days each; the 30- and 90-day evidence lives in the reset output.
+- **Review: setup takes the business row exclusively (D92).** Every item setup write waits for, and holds up, stock writes in the whole business, like an order action. Setup is rare, so I chose the simplest lock that keeps the rules right; a busy business that edits items all day would want per-item locks instead.
+- **Gaps in item setup (D95):** no deleting items or units, no setting up suppliers or locations, and no history of setup changes (who changed a par level, and when).
 - **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
@@ -210,10 +212,18 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   2. Property machine: a rule that changes a par level, so the alerts and draft-lines invariants cover re-evaluation by setup.
   3. API: `app/api/items.py` and its schemas (D90). Tests in `tests/test_api_items.py`.
   4. Docs: `docs/schema.md` (rule 10's list of what re-evaluates; the setup rules), README endpoint list, D95.
-- Decisions: D90 endpoints; D91 what can't change once used; D92 rules follow setup, with the business lock; D93 deactivation; D94 supplier prices, preferred, no client_id.
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
+- Decisions: D90 endpoints; D91 what can't change once used; D92 rules follow setup, with the business lock; D93 deactivation; D94 supplier prices, preferred, no client_id. Details row: D95.
+- Checks:
+  - `uv run pytest`: 593 passed in 153.4 s (555 after task 5). Gate 2's test 45.9 s, the property machine 35.1 s (with its new par-level rule), the determinism tests 14.7 s and 9.9 s.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 75 files.
+  - No migration in this task.
+  - `reset --end-date 2026-10-31` (3 × 30 days): 101 s. The movements of all three venues are identical to task 5's (café: receive 417, usage 2776, count_adjust 157, …; sweets: usage 1755; kitchen: usage 1895), as the plan requires for task 6.
+  - reconcile: all three OK.
+  - `git diff --check run/week-2...HEAD`: nothing.
 - Review: findings and what was done
 - Notes:
+  - A mutation check on the property machine (set_par_level without its re-evaluation) was caught.
+  - The domain worked examples check the rules with check_alerts and check_draft_lines rather than the full reconcile, because they build stock with test_alerts.py's batch_with (balances without movements), as the alerts examples do. The API tests and the property machine cover real movements.
 
 ### Task 7: gate 2 housekeeping
 
