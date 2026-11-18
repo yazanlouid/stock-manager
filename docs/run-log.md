@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 4, step 8 (CI and merge)
-- Branch and PR: feat/sim-week2, PR #13
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 built and checked
-- Next: open task 4's PR, review, CI, merge; then task 5
-- Next decision ID: D86
-- Updated: 2026-11-17 12:44
+- Task and step: task 5, step 4 (build)
+- Branch and PR: feat/venues, no PR yet
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5's decisions D86–D88 and plan
+- Next: build task 5 in the commit order of its plan below
+- Next decision ID: D89 (task 5's details row)
+- Updated: 2026-11-18 12:14
 
 ## For Yazan (look at these first)
 
@@ -144,7 +144,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
-- Branch, PR, merge commit: feat/sim-week2, PR #13
+- Branch, PR, merge commit: feat/sim-week2, PR #13, merged into run/week-2 as 6af1d9a (CI 1m40s)
 - Plan:
   1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, low-stock levels included (D83), each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows, with their low_stock_level.
   2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing. Standing orders and their carry go. A run that ends today stops at the current time (D82): the last day's events dated after it are left out, counts included, so D78's last-day rule goes.
@@ -175,9 +175,14 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 5: the sweets shop and the cloud kitchen
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/venues
 - Plan:
-- Decisions:
+  1. Move the venue dataclasses, weekday constants and the item constructor from `app/sim/cafe.py` to `app/sim/venue.py` (no behaviour change; the café's data stays in `cafe.py`).
+  2. `app/sim/sweets.py` (SWEETS) and `app/sim/kitchen.py` (KITCHEN), and `app/sim/venues.py` with VENUES in run order. Tune each with a 30- and a 90-day run until it raises every kind of alert, sends and receives orders and has a few shortfalls without looking broken.
+  3. CLI: reset and simulate run all three (D87); the default number of days is settled by timing 3 × 30 and 3 × 90 days.
+  4. Tests: the seed test for each venue; gate 2's test (D88) replacing gate 1's; the CLI tests for three venues.
+  5. Docs: CLAUDE.md commands, README (demo data, commands), D89.
+- Decisions: D86 the two venues and what each exercises; D87 the CLI runs all three, seeds per venue; D88 gate 2's test, gate 1's folded into it.
 - Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
 - Review: findings and what was done
 - Notes:
@@ -224,3 +229,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-17 12:20: PR #12 opened for D83, reviewed (two findings, one fixed, one declined).
 - 2026-11-17 12:27: PR #12 green (CI 1m47s) and squash-merged into run/week-2 as c22a57d.
 - 2026-11-17 12:28: run/week-2 merged into feat/sim-week2 (conflicts in decisions.md and the run log only); task 4 resumes.
+- 2026-11-17 about 12:50: the session stopped after PR #13's review fixes were pushed, with CI green.
+- 2026-11-18 12:11: resumed in the same session after Yazan's "Try again" (model unchanged: Claude Opus 5.5). Postgres had exited (code 0) about 12 hours earlier; `docker compose up -d db` brought it back.
+- 2026-11-18 12:13: PR #13 squash-merged into run/week-2 as 6af1d9a (CI 1m40s).
+- 2026-11-18 12:14: task 5 started on feat/venues.
