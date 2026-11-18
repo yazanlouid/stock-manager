@@ -34,6 +34,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ## Assumptions
 
+- (Task 7) Week 3's scope in CLAUDE.md includes demo login with owner and staff roles, and CORS, because the dashboard needs them; the spec's milestone row names only the screens, and D43 says the header lasts "until demo login". It also names the read endpoints that waste-by-reason and count-variance screens will need.
 - (Task 4) The owner places orders after closing, and deliveries come the morning of the delivery day, so a lead time of one day costs no day of usage (D76). The docs give lead times in days only.
 - (Task 4) The par levels in days per kind of item, the over-portioning shares, the theft chances, the short-delivery chances and the count weekdays are my numbers, chosen so that a month of café data shows every kind of alert and a few shortfalls without looking broken (D76 to D78).
 - (Task 5) Everything about the sweets shop and the cloud kitchen is my invention (D86): what they buy, from whom, pack sizes, prices (the kitchen's in AED), usage, opening hours, busy days, shelf lives, par and low-stock levels, shrinkage and supplier reliability. The docs only name the three verticals.
