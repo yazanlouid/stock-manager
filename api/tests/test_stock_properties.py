@@ -58,6 +58,7 @@ from app.domain.counts import BatchCountInput, CountItemInput, count_stock
 from app.domain.draft_lines import check_draft_lines
 from app.domain.errors import DomainError
 from app.domain.fefo import BatchSnapshot, allocate_usage
+from app.domain.items import set_par_level
 from app.domain.orders import cancel_order, send_order, set_line_quantity
 from app.domain.rules import evaluate_rules, sweep
 from app.domain.stock import ReceiptLineInput, rebuild_balances, receive, reverse, use, waste
@@ -716,6 +717,29 @@ class StockLedgerMachine(RuleBasedStateMachine):
         order_id = data.draw(st.sampled_from(self.orders_with("sent")))
         cancel_order(self.db, self.business_id, order_id=order_id, cancelled_at=self.at(hour))
         assert order_id in self.orders_with("cancelled")
+
+    @rule(
+        index=st.sampled_from([0, 2]),  # milk or flour, the items with par levels
+        low=thousandths(0, 1_500_000),
+        extra=thousandths(0, 1_500_000),
+        hour=HOURS,
+    )
+    def change_par_level(self, index: int, low: Decimal, extra: Decimal, hour: int) -> None:
+        """Item setup changes a par level, and the rules follow at once (D92):
+        the invariant below checks the alerts and draft lines against it."""
+        item = self.items[index][0]
+        reorder = low + extra
+        set_par_level(
+            self.db,
+            self.business_id,
+            item.id,
+            self.cat.location.id,
+            low_stock_level=low,
+            reorder_point=reorder,
+            order_up_to=ORDER_UP_TO,
+            at=self.at(hour),
+        )
+        self.levels[item.id] = (low, reorder)
 
     @rule(hour=HOURS)
     def sweep_rules(self, hour: int) -> None:
