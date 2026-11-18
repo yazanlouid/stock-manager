@@ -25,7 +25,8 @@ from app.models import (
     SupplierItem,
     User,
 )
-from app.sim.cafe import CAFE, Venue
+from app.sim.cafe import CAFE
+from app.sim.venue import Venue
 
 # Starts with "!", which no password hash format produces, so nobody can log in
 # with it. Demo login replaces it later.

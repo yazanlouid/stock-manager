@@ -104,7 +104,8 @@ from app.models import (
     StockBalance,
     SupplierItem,
 )
-from app.sim.cafe import CAFE, ItemSpec, SupplierSpec, Venue
+from app.sim.cafe import CAFE
+from app.sim.venue import ItemSpec, SupplierSpec, Venue
 
 DEFAULT_RANDOM_SEED = 20261110
 SOURCE = "simulator"
