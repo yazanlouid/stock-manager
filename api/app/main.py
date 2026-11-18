@@ -4,7 +4,7 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.api import alerts, catalogue, counts, orders, stock
+from app.api import alerts, catalogue, counts, items, orders, stock
 from app.api.deps import DbSession
 from app.domain.errors import DomainError
 
@@ -14,6 +14,7 @@ app.include_router(counts.router)
 app.include_router(alerts.router)
 app.include_router(orders.router)
 app.include_router(catalogue.router)
+app.include_router(items.router)
 
 
 @app.exception_handler(DomainError)

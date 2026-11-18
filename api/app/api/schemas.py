@@ -125,6 +125,64 @@ class OrderLineIn(RequestModel):
     qty_packs: StrictInt | None
 
 
+# --- Item setup requests (D90) --------------------------------------------------
+
+
+class UnitIn(RequestModel):
+    name: str
+    # Base units in one of this unit; it never changes afterwards (D91).
+    factor_to_base: Decimal
+
+
+class ItemIn(RequestModel):
+    sku: str
+    name: str
+    # g, ml or piece.
+    base_unit: str
+    category: str | None = None
+    tracks_batches: bool = False
+    # Only with tracks_batches: expiry dates are per batch.
+    tracks_expiry: bool = False
+    shelf_life_days: StrictInt | None = None
+    units: list[UnitIn] = []
+
+
+class ItemPatch(RequestModel):
+    """The fields to change; a field left out stays as it is. sku, name,
+    base_unit, the tracking flags and is_active can't be null (an explicit
+    null is a 422); category and shelf_life_days can, to clear them.
+    base_unit and tracking change only while the item has no movements."""
+
+    sku: str = None  # type: ignore[assignment]
+    name: str = None  # type: ignore[assignment]
+    category: str | None = None
+    shelf_life_days: StrictInt | None = None
+    is_active: bool = None  # type: ignore[assignment]
+    base_unit: str = None  # type: ignore[assignment]
+    tracks_batches: bool = None  # type: ignore[assignment]
+    tracks_expiry: bool = None  # type: ignore[assignment]
+
+
+class UnitPatch(RequestModel):
+    name: str
+
+
+class SupplierPriceIn(RequestModel):
+    supplier_id: UUID
+    item_unit_id: UUID
+    # Price of one pack of item_unit_id.
+    pack_price: Decimal
+    # True makes this the item's one preferred supplier price (D94).
+    is_preferred: bool = False
+
+
+class ParLevelIn(RequestModel):
+    # 0 <= low_stock_level <= reorder_point <= order_up_to, in base units.
+    low_stock_level: Decimal
+    reorder_point: Decimal
+    order_up_to: Decimal
+
+
 class CountBatchIn(RequestModel):
     batch_id: UUID
     # In the item's base unit; zero or more.
@@ -411,3 +469,33 @@ class CatalogueOut(BaseModel):
     locations: list[LocationOut]
     suppliers: list[SupplierOut]
     items: list[CatalogueItemOut]
+
+
+# --- Item setup responses (D90) -------------------------------------------------
+
+
+class ItemSupplierPriceOut(SupplierPriceOut):
+    # For DELETE /items/{item_id}/supplier-prices/{id}.
+    id: UUID
+
+
+class ParLevelOut(ResponseModel):
+    location_id: UUID
+    low_stock_level: Quantity
+    reorder_point: Quantity
+    order_up_to: Quantity
+
+
+class ItemSetupOut(ResponseModel):
+    id: UUID
+    sku: str
+    name: str
+    category: str | None
+    base_unit: str
+    tracks_batches: bool
+    tracks_expiry: bool
+    shelf_life_days: int | None
+    is_active: bool
+    units: list[ItemUnitOut]
+    supplier_prices: list[ItemSupplierPriceOut]
+    par_levels: list[ParLevelOut]
