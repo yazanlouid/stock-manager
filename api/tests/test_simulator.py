@@ -1,13 +1,16 @@
-"""The seed, the simulator and gate 1 (30 café days reconcile exactly).
+"""The seed, the simulator and gate 2 (D53, D88): three venues reconcile and
+run the rules on their own.
 
-The gate test runs the whole 30 days once, on db_session: each day's commit
-only releases a savepoint, and the test's transaction is rolled back at the
-end. Its path checks read the ledger, the alerts and the orders, not the
-simulator's counters.
+The gate test runs each venue's 14 days once, on db_session: each day's
+commit only releases a savepoint, and the test's transaction is rolled back
+at the end. Its path checks read the ledger, the alerts and the orders, not
+the simulator's counters. Gate 1's 30 café days fold into it (D88).
 """
 
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import Engine, func, or_, select, text
@@ -37,7 +40,9 @@ from app.models import (
 from app.sim import simulator
 from app.sim.cafe import CAFE
 from app.sim.seed import PLACEHOLDER_PASSWORD_HASH, seed
-from app.sim.simulator import SimulationError, simulate
+from app.sim.simulator import DEFAULT_RANDOM_SEED, SimulationError, simulate
+from app.sim.venue import Venue
+from app.sim.venues import VENUES
 from tests.test_alerts import recorded_statements
 
 END_DATE = date(2026, 10, 31)
@@ -46,12 +51,14 @@ AMMAN = timezone(timedelta(hours=3))
 
 
 def local_dates(db: Session, business_id) -> tuple[date, date]:
-    """The first and last occurred_at of the business's movements, as dates in Asia/Amman."""
+    """The first and last occurred_at of the business's movements, as dates in
+    the business's timezone."""
     return db.execute(
         text(
-            "SELECT min((occurred_at AT TIME ZONE 'Asia/Amman')::date),"
-            " max((occurred_at AT TIME ZONE 'Asia/Amman')::date)"
-            " FROM stock_movements WHERE business_id = :business_id"
+            "SELECT min((m.occurred_at AT TIME ZONE b.timezone)::date),"
+            " max((m.occurred_at AT TIME ZONE b.timezone)::date)"
+            " FROM stock_movements AS m JOIN businesses AS b ON b.id = m.business_id"
+            " WHERE m.business_id = :business_id"
         ),
         {"business_id": business_id},
     ).one()
@@ -60,11 +67,16 @@ def local_dates(db: Session, business_id) -> tuple[date, date]:
 # --- Seed -----------------------------------------------------------------------
 
 
-def test_seed_writes_the_cafe_catalogue_and_no_stock(db_session: Session):
-    business_id = seed(db_session, CAFE)
+@pytest.mark.parametrize("venue", VENUES, ids=lambda venue: venue.name)
+def test_seed_writes_the_venue_catalogue_and_no_stock(db_session: Session, venue: Venue):
+    business_id = seed(db_session, venue)
 
     business = db_session.get(Business, business_id)
-    assert (business.timezone, business.currency) == ("Asia/Amman", "JOD")
+    assert (business.name, business.timezone, business.currency) == (
+        venue.name,
+        venue.timezone,
+        venue.currency,
+    )
     locations = db_session.scalars(select(Location).where(Location.business_id == business_id))
     assert [location.kind for location in locations] == ["branch"]
 
@@ -76,7 +88,7 @@ def test_seed_writes_the_cafe_catalogue_and_no_stock(db_session: Session):
         assert user.email == user.email.lower() and user.email.endswith(".example")
 
     items = db_session.scalars(select(Item).where(Item.business_id == business_id)).all()
-    assert 35 <= len(items) <= 45
+    assert 20 <= len(items) <= 45
     kinds = {(item.tracks_batches, item.tracks_expiry) for item in items}
     # Batches with expiry, batches by lot without expiry, and no batch tracking.
     assert kinds == {(True, True), (True, False), (False, False)}
@@ -85,7 +97,7 @@ def test_seed_writes_the_cafe_catalogue_and_no_stock(db_session: Session):
     suppliers = db_session.scalar(
         select(func.count()).select_from(Supplier).where(Supplier.business_id == business_id)
     )
-    assert suppliers == 6
+    assert suppliers == len(venue.suppliers)
 
     supplier_items = db_session.scalars(
         select(SupplierItem).where(SupplierItem.business_id == business_id)
@@ -112,7 +124,9 @@ def test_seed_writes_the_cafe_catalogue_and_no_stock(db_session: Session):
         assert p.low_stock_level < p.reorder_point
 
 
-# --- Gate 1 ---------------------------------------------------------------------
+# --- Gate 2 (D53, D88) ---------------------------------------------------------
+
+GATE_DAYS = 14
 
 # Usage movements whose request was not reversed (a reversed mistake doesn't count).
 LIVE_USAGE = """
@@ -126,14 +140,47 @@ def ledger_count(db: Session, business_id, sql: str) -> int:
     return db.scalar(text(sql), {"business_id": business_id})
 
 
-def test_gate_1_thirty_cafe_days_reconcile(db_session: Session):
-    business_id = seed(db_session, CAFE)
-    summary = simulate(db_session, business_id, venue=CAFE, days=30, end_date=END_DATE)
+def test_gate_2_three_venues_reconcile_and_run_the_rules_on_their_own(db_session: Session):
+    """Each venue for 14 days, with the CLI's seeds: each reconciles and runs
+    the rules on its own, and across the three every path happened (D88)."""
+    paths: Counter[str] = Counter()
+    for index, venue in enumerate(VENUES):
+        business_id = seed(db_session, venue)
+        summary = simulate(
+            db_session,
+            business_id,
+            venue=venue,
+            days=GATE_DAYS,
+            end_date=END_DATE,
+            random_seed=DEFAULT_RANDOM_SEED + index,
+        )
 
-    assert reconcile(db_session, business_id) == []
+        assert reconcile(db_session, business_id) == [], venue.name
+        assert_the_ledger_is_the_simulators(db_session, business_id, summary)
+        assert_the_rules_ran(db_session, business_id, venue, summary.first_day)
+        paths.update(paths_taken(db_session, business_id))
 
-    # Every movement is the simulator's, with no user.
-    others = db_session.scalar(
+    # Across the three venues, every path gates 1 and 2 check (D81, D88).
+    required = {
+        "settle pair",
+        "usage split across batches",
+        "tracked shortfall",
+        "reversal",
+        "waste expired",
+        "waste spoiled",
+        "alert low_stock",
+        "alert expiring",
+        "alert expired",
+        "alert negative_stock",
+        "expired waste after its alert",
+    }
+    assert {path for path in required if paths[path] == 0} == set(), paths
+
+
+def assert_the_ledger_is_the_simulators(db: Session, business_id, summary) -> None:
+    """Every movement is the simulator's, with no user, dated within the run,
+    and the summary's counts agree with the ledger."""
+    others = db.scalar(
         select(func.count())
         .select_from(StockMovement)
         .where(
@@ -142,15 +189,11 @@ def test_gate_1_thirty_cafe_days_reconcile(db_session: Session):
         )
     )
     assert others == 0
-
-    # Every occurred_at falls between day 0 and the end date, in Asia/Amman.
-    first, last = local_dates(db_session, business_id)
-    assert summary.opening_day == date(2026, 10, 1)
+    first, last = local_dates(db, business_id)
+    assert summary.opening_day == END_DATE - timedelta(days=GATE_DAYS)
     assert summary.opening_day <= first and last <= END_DATE
-
-    # The summary's counts agree with the ledger.
     by_type = dict(
-        db_session.execute(
+        db.execute(
             select(StockMovement.type, func.count())
             .where(StockMovement.business_id == business_id)
             .group_by(StockMovement.type)
@@ -158,88 +201,42 @@ def test_gate_1_thirty_cafe_days_reconcile(db_session: Session):
     )
     assert by_type == dict(summary.movements_by_type)
 
-    # Each path the gate is meant to exercise happened at least once.
-    settle_pairs = ledger_count(
-        db_session,
-        business_id,
-        """
-        SELECT count(*) FROM (
-            SELECT client_id FROM stock_movements
-            WHERE business_id = :business_id AND type = 'settle'
-            GROUP BY client_id
-            HAVING bool_or(qty_delta > 0) AND bool_or(qty_delta < 0)
-        ) AS receipts_that_settled
-        """,
-    )
-    split_usages = ledger_count(
-        db_session,
-        business_id,
-        f"""
-        SELECT count(*) FROM (
-            SELECT client_id FROM ({LIVE_USAGE}) AS u
-            GROUP BY client_id HAVING count(DISTINCT batch_id) > 1
-        ) AS splits
-        """,
-    )
-    tracked_shortfalls = ledger_count(
-        db_session,
-        business_id,
-        f"""
-        SELECT count(*) FROM ({LIVE_USAGE}) AS u
-        JOIN batches AS b ON b.id = u.batch_id
-        JOIN items AS i ON i.id = u.item_id
-        WHERE b.is_default AND i.tracks_batches
-        """,
-    )
-    waste_reasons = set(
-        db_session.scalars(
-            select(StockMovement.reason)
-            .where(StockMovement.business_id == business_id, StockMovement.type == "waste")
-            .distinct()
-        )
-    )
-    assert settle_pairs >= 1
-    assert split_usages >= 1
-    assert tracked_shortfalls >= 1
-    assert {"expired", "spoiled"} <= waste_reasons
-    assert by_type.get("reversal", 0) >= 1
-    assert_week_2_paths(db_session, business_id, summary.first_day)
 
-
-def assert_week_2_paths(db: Session, business_id, first_day: date) -> None:
-    """D81: the rules and the owner's ordering ran on their own."""
-    # Every kind of alert was raised, and the alerts date is the end date (D79).
+def assert_the_rules_ran(db: Session, business_id, venue: Venue, first_day: date) -> None:
+    """D81, per venue: alerts raised, the alerts date at the end date, orders
+    sent on order days and received against them, and a count variance."""
+    local = ZoneInfo(venue.timezone)
     raised = set(db.scalars(select(Alert.type).where(Alert.business_id == business_id)))
-    assert raised == {"low_stock", "expiring", "expired", "negative_stock"}
+    assert {"low_stock", "expiring"} <= raised, (venue.name, raised)
     assert db.get(Business, business_id).alerts_swept_on == END_DATE
 
     # Orders were sent on their supplier's order days, and each receipt after
     # day 0 names an order and came its lead time after the order was sent, or
     # a day later when it was late (D77).
-    specs = {spec.name: spec for spec in CAFE.suppliers}
+    specs = {spec.name: spec for spec in venue.suppliers}
     orders = db.execute(
         select(PurchaseOrder, Supplier.name)
         .join(Supplier, Supplier.id == PurchaseOrder.supplier_id)
         .where(PurchaseOrder.business_id == business_id, PurchaseOrder.status != "draft")
     ).all()
-    assert len(orders) >= 20
+    assert len(orders) >= 10, venue.name
     by_id = {}
     for order, supplier in orders:
         spec = specs[supplier]
-        sent_on = order.sent_at.astimezone(AMMAN).date()
+        sent_on = order.sent_at.astimezone(local).date()
         assert sent_on.weekday() in spec.order_weekdays, (supplier, sent_on)
         by_id[order.id] = (order, spec, sent_on)
     receipts = db.scalars(
         select(Receipt).where(
             Receipt.business_id == business_id,
-            Receipt.received_at >= datetime.combine(first_day, time(0), AMMAN),
+            Receipt.received_at >= datetime.combine(first_day, time(0), local),
         )
     ).all()
     assert receipts and all(receipt.po_id is not None for receipt in receipts)
     for receipt in receipts:
         order, spec, sent_on = by_id[receipt.po_id]
         assert order.status == "received"
-        days = (receipt.received_at.astimezone(AMMAN).date() - sent_on).days
+        days = (receipt.received_at.astimezone(local).date() - sent_on).days
         assert days in (spec.lead_time_days, spec.lead_time_days + 1)
 
     # A count found a variance (D78).
@@ -251,15 +248,66 @@ def assert_week_2_paths(db: Session, business_id, first_day: date) -> None:
             StockCountLine.counted_qty != StockCountLine.expected_qty,
         )
     )
-    assert variances >= 1
+    assert variances >= 1, venue.name
 
-    # Expired stock was wasted after its expired alert was raised (D79).
-    after_alert = db.scalar(
+
+def paths_taken(db: Session, business_id) -> Counter[str]:
+    """How often each path the gate looks for happened in one business."""
+    paths: Counter[str] = Counter()
+    paths["settle pair"] = ledger_count(
+        db,
+        business_id,
+        """
+        SELECT count(*) FROM (
+            SELECT client_id FROM stock_movements
+            WHERE business_id = :business_id AND type = 'settle'
+            GROUP BY client_id
+            HAVING bool_or(qty_delta > 0) AND bool_or(qty_delta < 0)
+        ) AS receipts_that_settled
+        """,
+    )
+    paths["usage split across batches"] = ledger_count(
+        db,
+        business_id,
+        f"""
+        SELECT count(*) FROM (
+            SELECT client_id FROM ({LIVE_USAGE}) AS u
+            GROUP BY client_id HAVING count(DISTINCT batch_id) > 1
+        ) AS splits
+        """,
+    )
+    paths["tracked shortfall"] = ledger_count(
+        db,
+        business_id,
+        f"""
+        SELECT count(*) FROM ({LIVE_USAGE}) AS u
+        JOIN batches AS b ON b.id = u.batch_id
+        JOIN items AS i ON i.id = u.item_id
+        WHERE b.is_default AND i.tracks_batches
+        """,
+    )
+    for movement_type, reason, count in db.execute(
+        select(StockMovement.type, StockMovement.reason, func.count())
+        .where(
+            StockMovement.business_id == business_id,
+            StockMovement.type.in_(["reversal", "waste"]),
+        )
+        .group_by(StockMovement.type, StockMovement.reason)
+    ):
+        paths["reversal" if movement_type == "reversal" else f"waste {reason}"] += count
+    for alert_type, count in db.execute(
+        select(Alert.type, func.count())
+        .where(Alert.business_id == business_id)
+        .group_by(Alert.type)
+    ):
+        paths[f"alert {alert_type}"] += count
+    paths["expired waste after its alert"] = db.scalar(
         select(func.count())
         .select_from(StockMovement)
         .join(
             Alert,
-            (Alert.batch_id == StockMovement.batch_id)
+            (Alert.business_id == StockMovement.business_id)
+            & (Alert.batch_id == StockMovement.batch_id)
             & (Alert.type == "expired")
             & (Alert.raised_at <= StockMovement.occurred_at),
         )
@@ -269,7 +317,7 @@ def assert_week_2_paths(db: Session, business_id, first_day: date) -> None:
             StockMovement.reason == "expired",
         )
     )
-    assert after_alert >= 1
+    return paths
 
 
 # --- Determinism, default end date, failures ------------------------------------
