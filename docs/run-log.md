@@ -1,36 +1,46 @@
 # Run log: week 2 run (D58)
 
-Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
+Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: a draft from run/week-2 into main, opened after this log's last commit.
 
 ## Resume point
 
-- Status: in progress
-- Task and step: task 7, step 8 (CI and merge)
-- Branch and PR: feat/gate-2, PR #16
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6 merged as 9b13074 (PR #15); task 7's plan
-- Next: build task 7 in the commit order of its plan below, then the final step
+- Status: Complete
+- Task and step: the final step, done: CLAUDE.md's run section removed, this log finished, the draft PR into main opened
+- Branch and PR: run/week-2, the draft PR into main (not to be merged or marked ready by Claude Code)
+- Done: step 0 (30a3a2c); task 2 (PR #10, 464444a); task 3 (PR #11, 66e388c); D83 (PR #12, c22a57d); task 4 (PR #13, 6af1d9a); task 5 (PR #14, 102b96c); task 6 (PR #15, 9b13074); task 7 (PR #16, 5c2ddd8)
+- Not done: the optional hardening PRs (feat/receipt-line-location, feat/write-lookups); see For Yazan
 - Next decision ID: D97
-- Updated: 2026-11-18 13:07
+- Updated: 2026-11-18 13:19
 
 ## For Yazan (look at these first)
 
-- **Answered by Yazan (D82): the last day stops at the current time.** Built in task 4. What I wrote: **The last day and now() (D78): I kept D41 and propose changing it.** D41 says the last simulated day runs in full, even past the current time. With night counts that would stop API writes for the counted items until tonight, so the simulator doesn't count on its last day. The older problem remains: after a reset during the day, the API can't count an item until tomorrow, because movements dated later today already exist (D51). The fix is to stop the last day at the current time, which changes D41, so it is yours to decide; the plan mentions it as brought forward from week 3.
-- **Answered by Yazan (D83): low stock has its own level.** Built in PR #12 (D84), and the café's levels come in task 4. What I wrote: **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
-- **Review: an end date in the future is now refused (D85).** D82 says a reset leaves nothing dated in the future; a future end date would do exactly that, so simulate() refuses it before writing anything. It is a small addition to D82, easy to drop.
-- **Review: the closing check (D85).** At closing the simulated owner wastes, with an 80% chance each, the batches that expire that day. Without it, tonight's drafts counted stock that can't be sold tomorrow and ordered short. It makes expired alerts rare in the café (4 in 30 days), though every kind still shows.
-- **The CLI's default is 30 days, not 90 (D89).** The spec's demo is 3 × 90 days, which takes about six minutes here, so every reset would; `--days 90` gives it. Changing the default is one line.
-- **Gate 1's test is gone, folded into gate 2's (D88).** Every path it checked is still checked, across the three venues for 14 days each; the 30- and 90-day evidence lives in the reset output.
-- **Review: setup takes the business row exclusively (D92).** Every item setup write waits for, and holds up, stock writes in the whole business, like an order action. Setup is rare, so I chose the simplest lock that keeps the rules right; a busy business that edits items all day would want per-item locks instead.
-- **Gaps in item setup (D95):** no deleting items or units, no setting up suppliers or locations, and no history of setup changes (who changed a par level, and when).
-- **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
-- **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
-- **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
-- **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 and 4 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
-- **D62: GET /alerts writes.** It runs the sweep when the local date has moved on, so a GET can raise and resolve alerts. The alternatives were a CLI command (nothing runs it outside the simulator) or the API's start-up (stale from the next day).
-- **Task 3, things the owner can't do in v1 (D67, D69):** add a line for an item that isn't low, create an order by hand, or cancel a draft; and an owner's quantity on a draft line is lost if the item recovers before the draft is sent. All four follow from keeping a draft as a pure projection of the par-level rule. If you want hand-made lines, the smallest change is to keep lines that have a qty_packs and add an `origin` column.
-- **D63: the expiry window's formula** (min of expiry_warn_days and half the shelf life) is my number; see Assumptions.
-- **Proposed hard rule (not added, the plan says to propose):** "`alerts` is a projection, written only by `app/domain/alerts.py`. Anything that changes what an alert depends on (a balance, a par level, an item's is_active or shelf_life_days, expiry_warn_days) re-evaluates the item in the same transaction." Task 6's item setup has to follow it either way (D59).
-- **A timing to know about:** every stock write now runs two more statements (the business-row lock and the evaluation). Gate 1's test went from 43.7 s to 48–51 s on this machine, about 11% by profile; one run read 80.6 s with nothing else changed, so single timings here are noisy.
+Most important first. Decisions marked "to review" in docs/decisions.md are the run's (D59 to D96, except your D82 and D83).
+
+1. **Review first: D61, the alerts date.** Expiring, expired and low stock's "not expired" are judged against `businesses.alerts_swept_on`, which only the sweep moves, and the business row is the lock between a sweep and the writes. Tasks 3 to 6 build on it. The other option was to judge each write by its own date, which leaves the open alerts as a mix of dates that no single evaluation can check.
+2. **Proposed hard rule (not added; the plan says to propose):** "`alerts` and draft order lines are projections, written only by `app/domain/alerts.py` and `draft_lines.py` through `rules.py`. Anything that changes what they depend on (a balance, a par level, an item's is_active or shelf_life_days, the preferred supplier and its pack unit, expiry_warn_days) re-evaluates the item in the same transaction." The stock writes, the sweep, the order actions and item setup (D92) all follow it now; expiry_warn_days has no setup endpoint yet.
+3. **Look at the lock order (D61, D72, D92).** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. Order actions and item setup take the same row exclusively (FOR NO KEY UPDATE), so they wait for writes in progress and writes wait for them: simple and safe, but coarse; a business that edits items all day would want per-item locks.
+4. **D62: GET /alerts and GET /orders write.** They run the sweep when the local date has moved on, so a GET can raise and resolve alerts and change drafts. The alternatives were a CLI command (nothing runs it outside the simulator) or the API's start-up (stale from the next day).
+5. **What the owner can't do with drafts in v1 (D67, D69):** add a line for an item that isn't low, create an order by hand, or cancel a draft; and an owner's quantity on a draft line is lost if the item recovers before the draft is sent. All four follow from keeping a draft as a pure projection of the par-level rule. If you want hand-made lines, the smallest change is to keep lines that have a qty_packs and add an `origin` column.
+6. **Gate 1's test is folded into gate 2's (D88).** Every path it checked is still checked, across the three venues for 14 days each; the 30- and 90-day evidence lives in the reset output (D96). CI time stayed about the same.
+7. **The CLI's default is 30 days, not 90 (D89).** The spec's demo is 3 × 90 days, which takes about five to six minutes here, so every reset would; `--days 90` gives it. Changing the default is one line.
+8. **Two additions to your D82 (D85):** an end date in the future is refused before anything is written (it would date movements in the future), and without `--end-date` each venue ends today in its own timezone, so for an hour each evening the Dubai kitchen ends a day after the Amman venues.
+9. **The simulated owner's closing check (D85).** At closing, batches that expire that day are wasted with an 80% chance each; without it, that night's drafts counted stock that can't be sold tomorrow and ordered short. Expired alerts are rare as a result (14 in the café's 90 days, none in the sweets shop's), though gate 2 still sees every kind.
+10. **Item setup (D90 to D95):** an item's base unit changes only while it has no movements, units or par levels, and its tracking only before its first movement; a unit's size never changes. Gaps: no deleting items or units, no supplier or location setup, no history of setup changes. Quantities and amounts too large for numeric(14,3) are now a 400 in every write (they were a 500).
+11. **D63: the expiry window's formula** (the smaller of expiry_warn_days and half the shelf life) is my number; see Assumptions.
+12. **An option I declined (PR #11's review):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item is at or below its reorder point. It is the first thing to try if writes need to be faster.
+13. **Why test times swung so much (D75).** The planner's statistics for `stock_test`, analyzed while every test's rows had been rolled back, made 30-day runs about 40% slower; the simulator now runs ANALYZE after day 0 and weekly. Single timings on this machine still vary by tens of seconds.
+14. **Not done: the hardening PRs** (receipt lines tied to their batch's location, a decision; merging the two extra lookups every write runs since PR #9). I stopped after task 7 to finish the run cleanly.
+15. **Left on this machine:** a git stash on feat/draft-orders, "values rows experiment" (task 3), which the plan didn't let me drop; it can be dropped by hand. The dev database holds the 3 × 90-day demo.
+16. **Answered by you:** D82 (the last day stops at the current time), built in task 4; D83 (low stock has its own level), built in PR #12 with details in D84 and the venues' levels in tasks 4 and 5.
+
+## Suggested review order
+
+1. This list, then decisions D59 to D96 in docs/decisions.md.
+2. Migrations (`api/migrations/versions/`: par levels and alerts, purchase orders, the low-stock level) and docs/schema.md (rules 8 and 10, constraints).
+3. Domain code with its tests: `alerts.py`, `draft_lines.py`, `rules.py`, `orders.py`, `items.py`, the changes in `stock.py` and `reconcile.py`; then `tests/test_stock_properties.py`.
+4. API: `api/app/api/alerts.py`, `orders.py`, `items.py` and the schemas.
+5. Simulator and venues: `api/app/sim/simulator.py`, `venue.py`, `cafe.py`, `sweets.py`, `kitchen.py`, and the CLI; then `tests/test_simulator.py`.
+6. CLAUDE.md (week 3's milestone) and the README.
 
 ## Assumptions
 
@@ -295,3 +305,5 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-18 12:41: task 6 started on feat/item-setup.
 - 2026-11-18 13:06: PR #15 green (CI 1m49s) and squash-merged into run/week-2 as 9b13074.
 - 2026-11-18 13:07: task 7 started on feat/gate-2.
+- 2026-11-18 13:19: PR #16 green (CI 1m27s) and squash-merged into run/week-2 as 5c2ddd8. I left the optional hardening PRs undone.
+- 2026-11-18 13:19: final step: CLAUDE.md's run section removed and this log finished, committed to run/week-2; the draft PR into main follows.
