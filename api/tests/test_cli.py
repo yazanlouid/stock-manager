@@ -93,9 +93,34 @@ def test_simulate_seeds_simulates_and_reconciles(session_factory, db_session: Se
 
     out = capsys.readouterr().out
     assert "Days: 1, 2026-10-31 to 2026-10-31 (opening stock on 2026-10-30)" in out
-    assert "Movements: receive" in out
+    assert "Orders: sent " in out and "Alerts raised: " in out
+    (movements,) = [line for line in out.splitlines() if line.startswith("Movements: ")]
+    assert "receive " in movements
     business_id = db_session.scalar(select(Business.id))
     assert f"Reconcile Dar Zaatar Café ({business_id}): OK" in out
+
+
+def test_simulate_refuses_an_end_date_in_the_future_and_leaves_nothing(
+    session_factory, db_session: Session, capsys
+):
+    args = ["simulate", "--days", "1", "--end-date", "2999-01-01"]
+    assert cli.main(args, session_factory) == 1
+
+    assert "Can't simulate: the end date 2999-01-01 is in the future" in capsys.readouterr().err
+    assert db_session.scalar(select(func.count()).select_from(Business)) == 0
+
+
+def test_reset_refuses_an_end_date_in_the_future_before_erasing_anything(
+    session_factory, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("reset asked or recreated the schema")
+
+    monkeypatch.setattr(cli, "recreate_schema", must_not_run)
+    monkeypatch.setattr("builtins.input", must_not_run)
+
+    assert cli.main(["reset", "--end-date", "2999-01-01"], session_factory) == 1
+    assert "in the future" in capsys.readouterr().err
 
 
 def test_reconcile_exits_zero_and_prints_each_business_id(

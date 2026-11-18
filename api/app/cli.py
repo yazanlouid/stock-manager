@@ -19,7 +19,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
@@ -64,7 +64,8 @@ def _parser() -> argparse.ArgumentParser:
         "--end-date",
         type=date.fromisoformat,
         default=None,
-        help="last simulated day, YYYY-MM-DD (default: today in the business's timezone)",
+        help="last simulated day, YYYY-MM-DD, not after today (default: today in the"
+        " business's timezone; a run that ends today stops at the current time)",
     )
     options.add_argument(
         "--random-seed",
@@ -93,6 +94,9 @@ def _positive_int(value: str) -> int:
 
 
 def reset(args: argparse.Namespace, session_factory: SessionFactory) -> int:
+    # Before the schema is recreated, so a refused run leaves the data as it was.
+    if _refuse_future_end_date(args, session_factory):
+        return 1
     url = make_url(get_settings().database_url)
     print(f"This erases every table in database {url.database!r} on {url.host}:{url.port}")
     print("and fills it with fresh demo data.")
@@ -117,7 +121,32 @@ def recreate_schema() -> None:
 # --- simulate -------------------------------------------------------------------
 
 
+def _refuse_future_end_date(args: argparse.Namespace, session_factory: SessionFactory) -> bool:
+    """Print why and return True if --end-date is after today in the café's timezone (D82).
+
+    simulate() refuses it too, but only once the business is seeded; checking
+    here first lets reset refuse before it erases anything.
+    """
+    if args.end_date is None:
+        return False
+    with session_factory() as session:
+        today = session.scalar(
+            text("SELECT (now() AT TIME ZONE CAST(:timezone AS text))::date"),
+            {"timezone": CAFE.timezone},
+        )
+    if args.end_date <= today:
+        return False
+    print(
+        f"Can't simulate: the end date {args.end_date} is in the future (today is {today}),"
+        " and a run never dates anything after the current time.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> int:
+    if _refuse_future_end_date(args, session_factory):
+        return 1
     with session_factory() as session:
         if session.scalar(select(Business.id).limit(1)) is not None:
             print("The database already has a business, so simulate won't add another.")
@@ -151,13 +180,24 @@ def format_summary(summary: SimulationSummary) -> list[str]:
     shortfalls = ", ".join(f"{sku} {n}" for sku, n in sorted(summary.shortfalls_by_sku.items()))
     return [
         f"Days: {summary.days}, {summary.first_day} to {summary.end_date}"
-        f" (opening stock on {summary.opening_day}), random seed {summary.random_seed}",
-        f"Receipts: {summary.receipts} ({summary.late_deliveries} late)",
+        f" (opening stock on {summary.opening_day}), random seed {summary.random_seed}"
+        + (
+            f"; the last day stopped at the current time, {summary.stopped_at:%Y-%m-%d %H:%M %z}"
+            if summary.stopped_at
+            else ""
+        ),
+        f"Orders: sent {summary.orders_sent}, received {summary.orders_received},"
+        f" cancelled {summary.orders_cancelled}; now {counts(summary.orders_by_status)}",
+        f"Receipts: {summary.receipts} ({summary.late_deliveries} late,"
+        f" {summary.short_deliveries} short)",
         f"Movements: {counts(summary.movements_by_type)}",
         f"Waste by reason: {counts(summary.waste_by_reason)}",
         f"Shortfalls: {summary.shortfalls}" + (f" ({shortfalls})" if shortfalls else ""),
         f"Settle pairs: {summary.settle_pairs}",
         f"Reversals: {summary.reversals}",
+        f"Counts: {summary.counts} ({summary.count_variances} lines with a variance)",
+        f"Alerts raised: {counts(summary.alerts_raised)}",
+        f"Alerts open: {counts(summary.alerts_open)}",
     ]
 
 
