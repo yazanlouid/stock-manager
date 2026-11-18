@@ -136,6 +136,12 @@ def test_a_par_level_raises_its_rules_in_the_same_request(client: TestClient, ca
     assert call(client, cat, "GET", "/orders", params={"status": "draft"}) == []
 
 
+def test_numbers_too_large_for_their_column_are_a_400_not_a_500(client: TestClient, cat: Catalogue):
+    levels = {"low_stock_level": "0", "reorder_point": "0", "order_up_to": "100000000000"}
+    call(client, cat, "PUT", f"/items/{cat.item.id}/par-levels/{cat.location.id}", 400, **levels)
+    call(client, cat, "POST", "/items", 400, **(FLOUR | {"shelf_life_days": 3_000_000_000}))
+
+
 def test_par_levels_out_of_order_are_a_400(client: TestClient, cat: Catalogue):
     levels = {"low_stock_level": "3000", "reorder_point": "2000", "order_up_to": "6000"}
     body = call(

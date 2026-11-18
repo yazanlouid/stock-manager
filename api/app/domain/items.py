@@ -52,6 +52,8 @@ from app.models import (
 )
 
 BASE_UNITS = ("g", "ml", "piece")
+# A shelf life is days, in an integer column; a hundred years is plenty.
+MAX_SHELF_LIFE_DAYS = 36_500
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +174,13 @@ def update_item(
             raise DomainError(
                 f"item {item.sku} has movements, so its base unit and tracking can't change"
             )
+        if new_base != item.base_unit and _has_quantities(session, business_id, item.id):
+            # Their numbers are in the old base unit, and units can't be
+            # resized or removed (D91): a bare item can change, or start anew.
+            raise DomainError(
+                f"item {item.sku} has units or par levels in {item.base_unit},"
+                " so its base unit can't change; create a new item instead"
+            )
         item.base_unit, item.tracks_batches, item.tracks_expiry = (
             new_base,
             new_batches,
@@ -183,9 +192,9 @@ def update_item(
         _check_shelf_life(shelf_life_days)
         item.shelf_life_days = shelf_life_days
         rules_change = True
+    if not isinstance(is_active, (_Unset, bool)):
+        raise TypeError(f"is_active must be a bool, not {type(is_active).__name__}")
     if not isinstance(is_active, _Unset) and is_active != item.is_active:
-        if not isinstance(is_active, bool):
-            raise TypeError(f"is_active must be a bool, not {type(is_active).__name__}")
         item.is_active = is_active
         rules_change = True
 
@@ -400,6 +409,18 @@ def _has_moved(session: Session, business_id: UUID, item_id: UUID) -> bool:
     )
 
 
+def _has_quantities(session: Session, business_id: UUID, item_id: UUID) -> bool:
+    """Whether the item has a unit or a par level, both written in its base unit."""
+    return bool(
+        session.scalar(
+            select(
+                exists().where(ItemUnit.business_id == business_id, ItemUnit.item_id == item_id)
+                | exists().where(ParLevel.business_id == business_id, ParLevel.item_id == item_id)
+            )
+        )
+    )
+
+
 def _preferred(session: Session, business_id: UUID, item_id: UUID) -> SupplierItem | None:
     return session.scalar(
         select(SupplierItem).where(
@@ -503,8 +524,10 @@ def _check_shelf_life(shelf_life_days: int | None) -> None:
         return
     if isinstance(shelf_life_days, bool) or not isinstance(shelf_life_days, int):
         raise TypeError(f"shelf_life_days must be an int, not {type(shelf_life_days).__name__}")
-    if shelf_life_days <= 0:
-        raise DomainError(f"shelf_life_days must be positive, got {shelf_life_days}")
+    if not 0 < shelf_life_days <= MAX_SHELF_LIFE_DAYS:
+        raise DomainError(
+            f"shelf_life_days must be from 1 to {MAX_SHELF_LIFE_DAYS}, got {shelf_life_days}"
+        )
 
 
 def _text(value: str, name: str) -> str:

@@ -5,8 +5,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 6, step 6 (PR)
-- Branch and PR: feat/item-setup, no PR yet
+- Task and step: task 6, step 8 (CI and merge)
+- Branch and PR: feat/item-setup, PR #15
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6's decisions D90–D94 and plan
 - Next: build task 6 in the commit order of its plan below
 - Next decision ID: D96
@@ -206,7 +206,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 6: the item setup API
 
-- Branch, PR, merge commit: feat/item-setup
+- Branch, PR, merge commit: feat/item-setup, PR #15
 - Plan:
   1. `app/domain/items.py`: create_item, update_item, add_unit, rename_unit, set_supplier_price, remove_supplier_price, set_par_level, remove_par_level. Each locks the business row (orders.py's lock, made public as lock_business), checks, writes, and re-evaluates through evaluate_rules where D92 says. Worked examples in `tests/test_items.py`, each ending with reconcile's alert and draft-line checks.
   2. Property machine: a rule that changes a par level, so the alerts and draft-lines invariants cover re-evaluation by setup.
@@ -220,7 +220,13 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   - `reset --end-date 2026-10-31` (3 × 30 days): 101 s. The movements of all three venues are identical to task 5's (café: receive 417, usage 2776, count_adjust 157, …; sweets: usage 1755; kitchen: usage 1895), as the plan requires for task 6.
   - reconcile: all three OK.
   - `git diff --check run/week-2...HEAD`: nothing.
-- Review: findings and what was done
+- Review: `/code-review` at high effort on PR #15, five findings, four fixed, one declined.
+  1. Fixed: numbers too large for their column (a factor, a price or a par level of 10^11 or more, a shelf life past int4) reached Postgres and came back as a 500. The shared checks now refuse a quantity or an amount above 99,999,999,999.999 with a 400, which covers the stock writes too, where the same 500 was possible; shelf lives must be 1 to 36,500 days.
+  2. Fixed: update_item compared is_active before checking its type, so a direct caller's 1 or 0 could be ignored; the type is checked first.
+  3. Fixed: changing the base unit before the first movement kept the item's units and par levels, whose numbers were in the old unit (a 1000 ml bottle would become 1000 g). The base unit now changes only on an item with no units and no par levels; otherwise the owner creates a new item (units can't be resized or removed, D91). Tracking still changes until the first movement.
+  4. Fixed: the lock-order test covered five of the eight setup writes; it now covers all eight.
+  5. Declined: each write endpoint looks the item up for its 404 and the domain looks it up again. The 404/400 split needs the first lookup, and it is one indexed query per setup write.
+  - After the fixes: 599 passed in 157.1 s, ruff clean.
 - Notes:
   - A mutation check on the property machine (set_par_level without its re-evaluation) was caught.
   - The domain worked examples check the rules with check_alerts and check_draft_lines rather than the full reconcile, because they build stock with test_alerts.py's batch_with (balances without movements), as the alerts examples do. The API tests and the property machine cover real movements.

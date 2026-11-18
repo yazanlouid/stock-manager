@@ -99,7 +99,9 @@ def test_create_item_with_its_units(db_session: Session, cat: Catalogue):
         ({"name": ""}, "name must not be empty"),
         ({"base_unit": "kg"}, "base_unit must be one of g, ml, piece"),
         ({"tracks_expiry": True}, "must track batches"),
-        ({"shelf_life_days": 0}, "shelf_life_days must be positive"),
+        ({"shelf_life_days": 0}, "shelf_life_days must be from 1 to 36500"),
+        ({"shelf_life_days": 36501}, "shelf_life_days must be from 1 to 36500"),
+        ({"units": [UnitInput("bag", d("100000000000"))]}, "factor_to_base must be at most"),
         ({"units": [UnitInput("bag", d("0"))]}, "factor_to_base must be positive"),
         ({"units": [UnitInput("bag", d("1")), UnitInput("bag", d("2"))]}, "same name"),
     ],
@@ -121,6 +123,11 @@ def test_a_sku_is_unique_per_business_only(db_session: Session, cat: Catalogue, 
 # --- Updating items -------------------------------------------------------------
 
 
+def test_is_active_must_be_a_bool_even_when_it_matches(db_session: Session, cat: Catalogue):
+    with pytest.raises(TypeError, match="is_active must be a bool"):
+        update_item(db_session, cat.business.id, cat.item.id, at=AT, is_active=1)
+
+
 def test_names_skus_and_categories_change_freely(db_session: Session, cat: Catalogue):
     item = update_item(
         db_session, cat.business.id, cat.item.id, at=AT, sku="DAI-MILK", name="Milk", category=None
@@ -136,25 +143,31 @@ def test_base_unit_and_tracking_change_only_before_the_first_movement(
     db_session: Session, cat: Catalogue
 ):
     item = update_item(
-        db_session,
-        cat.business.id,
-        cat.item.id,
-        at=AT,
-        tracks_expiry=False,
-        tracks_batches=False,
-        base_unit="g",
+        db_session, cat.business.id, cat.item.id, at=AT, tracks_expiry=False, tracks_batches=False
     )
-    assert (item.base_unit, item.tracks_batches, item.tracks_expiry) == ("g", False, False)
+    assert (item.tracks_batches, item.tracks_expiry) == (False, False)
     with pytest.raises(DomainError, match="must track batches"):
         update_item(db_session, cat.business.id, cat.item.id, at=AT, tracks_expiry=True)
 
     do_use(db_session, cat, cat.item, "100", occurred_at=nov(10, 8))
 
-    for change in ({"base_unit": "ml"}, {"tracks_batches": True}):
+    for change in ({"base_unit": "g"}, {"tracks_batches": True}):
         with pytest.raises(DomainError, match="has movements"):
             update_item(db_session, cat.business.id, cat.item.id, at=AT, **change)
     # Sending the values it already has is no change.
-    update_item(db_session, cat.business.id, cat.item.id, at=AT, base_unit="g")
+    update_item(db_session, cat.business.id, cat.item.id, at=AT, base_unit="ml")
+
+
+def test_the_base_unit_changes_only_on_a_bare_item(db_session: Session, cat: Catalogue):
+    item = create_item(db_session, cat.business.id, sku="NEW-1", name="New", base_unit="g")
+
+    update_item(db_session, cat.business.id, item.id, at=AT, base_unit="piece")
+    assert item.base_unit == "piece"
+
+    # A unit's size is in the base unit, and it can't be resized (D91).
+    add_unit(db_session, cat.business.id, item.id, name="box", factor_to_base=d("12"))
+    with pytest.raises(DomainError, match="has units or par levels in piece"):
+        update_item(db_session, cat.business.id, item.id, at=AT, base_unit="g")
 
 
 def test_a_shorter_shelf_life_narrows_the_expiry_window_at_once(
@@ -353,6 +366,7 @@ def test_setting_and_removing_a_par_level_re_evaluates_the_item_there(
         (("0", "6001", "6000"), "must be in order"),
         (("-1", "2000", "6000"), "low_stock_level must not be negative"),
         (("0", "0", "0"), "order_up_to must be positive"),
+        (("0", "0", "100000000000"), "order_up_to must be at most 99999999999.999"),
     ],
 )
 def test_par_levels_must_be_in_order(db_session: Session, cat: Catalogue, levels, message):
@@ -397,8 +411,22 @@ def test_every_setup_write_locks_the_business_row_first(db_session: Session, cat
         lambda: add_unit(
             db_session, cat.business.id, cat.item.id, name="lock", factor_to_base=d("1")
         ),
+        lambda: rename_unit(db_session, cat.business.id, cat.item.id, cat.unit.id, name="b"),
+        lambda: set_supplier_price(
+            db_session,
+            cat.business.id,
+            cat.item.id,
+            supplier_id=cat.supplier.id,
+            item_unit_id=cat.unit.id,
+            pack_price=d("1"),
+            is_preferred=True,
+            at=AT,
+        ),
         lambda: par(db_session, cat, "1", "2", "3"),
         lambda: remove_par_level(db_session, cat.business.id, cat.item.id, cat.location.id, at=AT),
+        lambda: remove_supplier_price(
+            db_session, cat.business.id, cat.item.id, cat.supplier_item.id, at=AT
+        ),
     ]
     for write in writes:
         with recorded_statements(db_session) as statements:
