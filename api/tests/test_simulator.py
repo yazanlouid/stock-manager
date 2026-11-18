@@ -39,6 +39,7 @@ from app.models import (
 )
 from app.sim import simulator
 from app.sim.cafe import CAFE
+from app.sim.kitchen import KITCHEN
 from app.sim.seed import PLACEHOLDER_PASSWORD_HASH, seed
 from app.sim.simulator import DEFAULT_RANDOM_SEED, SimulationError, simulate
 from app.sim.venue import Venue
@@ -428,7 +429,9 @@ def natural_ledger(db: Session, business_id) -> dict[str, list[tuple]]:
     }
 
 
-def run_in_own_transaction(engine: Engine, **options) -> dict[str, list[tuple]]:
+def run_in_own_transaction(
+    engine: Engine, venue: Venue = CAFE, **options
+) -> dict[str, list[tuple]]:
     """Seed and simulate on a fresh connection, read the ledger, then roll it all back.
 
     A savepoint inside db_session wouldn't do: each day's commit releases it.
@@ -437,18 +440,20 @@ def run_in_own_transaction(engine: Engine, **options) -> dict[str, list[tuple]]:
         transaction = connection.begin()
         session = Session(bind=connection, join_transaction_mode="create_savepoint")
         try:
-            business_id = seed(session, CAFE)
-            simulate(session, business_id, venue=CAFE, **options)
+            business_id = seed(session, venue)
+            simulate(session, business_id, venue=venue, **options)
             return natural_ledger(session, business_id)
         finally:
             session.close()
             transaction.rollback()
 
 
-def test_the_same_seed_and_end_date_give_an_identical_ledger(engine: Engine):
-    options = {"days": 7, "end_date": END_DATE, "random_seed": 42}
-    first = run_in_own_transaction(engine, **options)
-    second = run_in_own_transaction(engine, **options)
+# The café, and the kitchen, whose local times are in another timezone (D86).
+@pytest.mark.parametrize("venue", [CAFE, KITCHEN], ids=lambda venue: venue.name)
+def test_the_same_seed_and_end_date_give_an_identical_ledger(engine: Engine, venue: Venue):
+    options = {"days": 5, "end_date": END_DATE, "random_seed": 42}
+    first = run_in_own_transaction(engine, venue, **options)
+    second = run_in_own_transaction(engine, venue, **options)
 
     assert len(first["movements"]) > 100
     assert first["alerts"] and first["orders"] and first["count_lines"]

@@ -159,7 +159,9 @@ def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> i
             return 1
         # One venue at a time, each in its own business, with the run's seed
         # plus its position, so the café keeps the run's seed (D87). Each
-        # venue's days are committed as they go.
+        # venue's days are committed as they go. Without --end-date, each
+        # ends today in its own timezone (D82), so for an hour each evening
+        # the kitchen in Dubai, an hour ahead of Amman, ends a day later.
         for index, venue in enumerate(VENUES):
             business_id = seed(session, venue)
             try:

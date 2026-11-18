@@ -76,7 +76,7 @@ class ItemSpec:
     shelf_life_days: int | None
     unit_name: str
     factor_to_base: int
-    pack_price: Decimal  # JOD, three decimals
+    pack_price: Decimal  # in the venue's currency, three decimals
     supplier: str  # SupplierSpec.key
     # Base units used on an average day (weekday factor 1000).
     daily_usage: int
