@@ -5,11 +5,11 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 7, step 4 (build)
+- Task and step: task 7, step 6 (PR)
 - Branch and PR: feat/gate-2, no PR yet
 - Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5 merged as 102b96c (PR #14); task 6 merged as 9b13074 (PR #15); task 7's plan
 - Next: build task 7 in the commit order of its plan below, then the final step
-- Next decision ID: D96 (task 7's details row)
+- Next decision ID: D97
 - Updated: 2026-11-18 13:07
 
 ## For Yazan (look at these first)
@@ -242,9 +242,23 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
   4. README: the Status section describes week 2.
   5. Gate 2 evidence, in the PR and here: `reset --days 90 --end-date 2026-10-31` and reconcile, alerts and draft orders per venue, the test count and suite time, and CI's time.
 - Decisions: none new beyond D96, the gate and its evidence.
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
+- Checks:
+  - `uv run pytest`: 599 passed in 168.0 s (366 at the baseline, 593 before task 6's review fixes). Gate 2's test 48.4 s, the property machine 37.7 s, the determinism tests 19.2 s (café) and about 10 s (kitchen). CI took 1m49s on PR #15.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 75 files.
+  - No migration in this task.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Gate 2 evidence: `reset --days 90 --end-date 2026-10-31`, 307 s, identical to the run in task 5.
+
+  | Venue | Orders sent / received / cancelled | Receipts (late, short) | Movements | Count lines with a variance | Alerts raised (expired / expiring / low_stock / negative_stock) | Open at the end | Drafts waiting |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | Dar Zaatar Café | 254 / 248 / 1 | 254 (14, 6) | 10,534 | 466 | 922 (14 / 449 / 378 / 81) | 9 | 3 |
+  | Sukkar & Semsem Sweets | 216 / 214 / 0 | 219 (12, 11) | 6,646 | 340 | 343 (0 / 130 / 180 / 33) | 2 | 3 |
+  | Sahtein Cloud Kitchen | 263 / 259 / 1 | 265 (18, 14) | 7,272 | 368 | 865 (5 / 529 / 268 / 63) | 12 | 4 |
+
+  reconcile: Dar Zaatar Café OK, Sahtein Cloud Kitchen OK, Sukkar & Semsem Sweets OK.
 - Review: findings and what was done
 - Notes:
+  - The 3 × 90 run uses the CLI's seeds (20261110, +1, +2) and leaves the dev database with the full demo.
 
 ## Timeline
 
