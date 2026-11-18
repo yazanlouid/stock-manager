@@ -5,12 +5,12 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 ## Resume point
 
 - Status: in progress
-- Task and step: task 4, step 8 (CI and merge)
-- Branch and PR: feat/sim-week2, PR #13
-- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 built and checked
-- Next: open task 4's PR, review, CI, merge; then task 5
-- Next decision ID: D86
-- Updated: 2026-11-17 12:44
+- Task and step: task 5, step 8 (CI and merge)
+- Branch and PR: feat/venues, PR #14
+- Done so far: step 0 (30a3a2c); task 2 merged as 464444a (PR #10); task 3 merged as 66e388c (PR #11); D83 merged as c22a57d (PR #12); task 4 merged as 6af1d9a (PR #13); task 5's decisions D86–D88 and plan
+- Next: build task 5 in the commit order of its plan below
+- Next decision ID: D90
+- Updated: 2026-11-18 12:14
 
 ## For Yazan (look at these first)
 
@@ -18,6 +18,8 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - **Answered by Yazan (D83): low stock has its own level.** Built in PR #12 (D84), and the café's levels come in task 4. What I wrote: **Low stock is open every evening for items delivered daily (D76).** The reorder point is what triggers an order, and a daily-delivered pastry is below it every night, so its low_stock alert is raised and resolved every day. If the dashboard should only show items that are really running out, low stock needs its own lower level, separate from the reorder point.
 - **Review: an end date in the future is now refused (D85).** D82 says a reset leaves nothing dated in the future; a future end date would do exactly that, so simulate() refuses it before writing anything. It is a small addition to D82, easy to drop.
 - **Review: the closing check (D85).** At closing the simulated owner wastes, with an 80% chance each, the batches that expire that day. Without it, tonight's drafts counted stock that can't be sold tomorrow and ordered short. It makes expired alerts rare in the café (4 in 30 days), though every kind still shows.
+- **The CLI's default is 30 days, not 90 (D89).** The spec's demo is 3 × 90 days, which takes about six minutes here, so every reset would; `--days 90` gives it. Changing the default is one line.
+- **Gate 1's test is gone, folded into gate 2's (D88).** Every path it checked is still checked, across the three venues for 14 days each; the 30- and 90-day evidence lives in the reset output.
 - **An option I declined (PR #11's review, finding 4):** the draft-line query runs on every stock write, about 6% of a simulated month, although a line can only be due while the item's low_stock alert is due. The alerts evaluation could tell the caller when to skip it. I left it out because it ties two modules together for a saving that is small now; it is the first thing to try if writes need to be faster.
 - **Why test times swung so much (D75).** Timings on this machine varied by tens of seconds between identical runs, and PR #9 reported 100 to 250 s. The cause is the planner's statistics for `stock_test`: autovacuum analyzes it between runs, when every test's rows have been rolled back, so the statistics say the tables are empty, and a 30-day simulation inside one transaction then runs about 40% slower (reproduced both ways). The simulator now runs ANALYZE after day 0 and weekly, which also helps a real `reset`. This touches the simulator in task 3, though its movements are unchanged.
 - **Look at the lock order in D61.** PR #10's review found that a stock write and the alerts sweep could deadlock (reproduced on the dev database), because writes took the business-row lock after their batch locks. Writes now take it first, inside `_lock_defaults`, and a test pins the order. It was caught before merge, but it is the kind of bug worth a second pair of eyes.
@@ -32,6 +34,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 - (Task 4) The owner places orders after closing, and deliveries come the morning of the delivery day, so a lead time of one day costs no day of usage (D76). The docs give lead times in days only.
 - (Task 4) The par levels in days per kind of item, the over-portioning shares, the theft chances, the short-delivery chances and the count weekdays are my numbers, chosen so that a month of café data shows every kind of alert and a few shortfalls without looking broken (D76 to D78).
+- (Task 5) Everything about the sweets shop and the cloud kitchen is my invention (D86): what they buy, from whom, pack sizes, prices (the kitchen's in AED), usage, opening hours, busy days, shelf lives, par and low-stock levels, shrinkage and supplier reliability. The docs only name the three verticals.
 - (Task 4) The low-stock levels in days per kind of item (D85: dairy 1, pastry 0.33, produce 1.5, beans 2.5, dry goods and packaging 4) are my numbers: below what is normally left just before a delivery, so the alert means a late or short delivery or a busy day (D83).
 - (Task 4) A short delivery brings 40 to 80% of each line; a late one keeps the expiry date of its planned day (D77).
 - (Task 4) Demand isn't capped by what is in stock: usage is logged as demanded, as in week 1, and runs short when a delivery is late or short. Unlogged loss only shows at a count.
@@ -144,7 +147,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 4: the simulator on week 2 rules, for the café
 
-- Branch, PR, merge commit: feat/sim-week2, PR #13
+- Branch, PR, merge commit: feat/sim-week2, PR #13, merged into run/week-2 as 6af1d9a (CI 1m40s)
 - Plan:
   1. Venue data (`app/sim/cafe.py`): par levels per kind of item in days of usage, low-stock levels included (D83), each supplier's short-delivery chance and derived order weekdays, each kind's count weekday, over-portioning and theft, and the venue's order and count times. The standing-order fields (buffer, safety days) go. `seed.py` writes the par_levels rows, with their low_stock_level.
   2. Simulator (`app/sim/simulator.py`): a sweep at the start of each day; the morning check driven by open expired alerts; after closing, send the drafts of the suppliers whose order day it is and plan each delivery (late, short or cancelled); deliveries received against their order; unlogged loss per item, and a weekly count per kind after closing. Standing orders and their carry go. A run that ends today stops at the current time (D82): the last day's events dated after it are left out, counts included, so D78's last-day rule goes.
@@ -175,12 +178,29 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 
 ### Task 5: the sweets shop and the cloud kitchen
 
-- Branch, PR, merge commit:
+- Branch, PR, merge commit: feat/venues, PR #14
 - Plan:
-- Decisions:
-- Checks: test count, suite time, gate 1's test time; migration round trip; reset summary; reconcile; CI time
-- Review: findings and what was done
+  1. Move the venue dataclasses, weekday constants and the item constructor from `app/sim/cafe.py` to `app/sim/venue.py` (no behaviour change; the café's data stays in `cafe.py`).
+  2. `app/sim/sweets.py` (SWEETS) and `app/sim/kitchen.py` (KITCHEN), and `app/sim/venues.py` with VENUES in run order. Tune each with a 30- and a 90-day run until it raises every kind of alert, sends and receives orders and has a few shortfalls without looking broken.
+  3. CLI: reset and simulate run all three (D87); the default number of days is settled by timing 3 × 30 and 3 × 90 days.
+  4. Tests: the seed test for each venue; gate 2's test (D88) replacing gate 1's; the CLI tests for three venues.
+  5. Docs: CLAUDE.md commands, README (demo data, commands), D89.
+- Decisions: D86 the two venues and what each exercises; D87 the CLI runs all three, seeds per venue; D88 gate 2's test, gate 1's folded into it. Details row: D89.
+- Checks:
+  - `uv run pytest`: 555 passed in 176.3 s (553 after task 4). Gate 2's test 56.4 s in the full run and 48.8 s alone, replacing gate 1's (46.4 s after task 4); the property machine 39.8 s; the determinism test 23.6 s.
+  - `uv run ruff check .` and `uv run ruff format --check .`: clean, 71 files.
+  - No migration in this task.
+  - `reset --end-date 2026-10-31` (3 × 30 days): 115 s. The café's summary is identical to task 4's (its seed is unchanged, D87). Sukkar & Semsem Sweets: orders sent 70, received 68; receipts 73 (2 late, 0 short); shortfalls 1; counts 20 (107 lines with a variance); alerts raised expiring 45, low_stock 58, negative_stock 5. Sahtein Cloud Kitchen: orders sent 83, received 80; receipts 86 (3 late, 3 short); shortfalls 5; counts 25 (126 lines with a variance); alerts raised expired 1, expiring 165, low_stock 96, negative_stock 12.
+  - `reset --days 90 --end-date 2026-10-31` (3 × 90 days): 349 s. Café: orders sent 254, received 248, cancelled 1; receipts 254 (14 late, 6 short); shortfalls 116; counts 77 (466 lines with a variance); alerts raised expired 14, expiring 449, low_stock 378, negative_stock 81. Sweets: orders sent 216, received 214; receipts 219 (12 late, 11 short); shortfalls 32; counts 64 (340); alerts raised expiring 130, low_stock 180, negative_stock 33. Kitchen: orders sent 263, received 259, cancelled 1; receipts 265 (18 late, 14 short); shortfalls 55; counts 77 (368); alerts raised expired 5, expiring 529, low_stock 268, negative_stock 63.
+  - reconcile: all three OK after both resets.
+  - `git diff --check run/week-2...HEAD`: nothing.
+- Review: `/code-review` at high effort on PR #14, three findings, all fixed.
+  1. Without --end-date, each venue ends today in its own timezone, so for an hour each evening the Dubai kitchen ends a day after the Amman venues, unlike D87's "same end date". That follows D82, so the behaviour stays; D87 and the CLI now say so.
+  2. Determinism was tested only for the café. The test now runs the café and the kitchen (another timezone), 5 days each, in the same total time (24.4 s against 23.6 s).
+  3. `ItemSpec.pack_price`'s comment said JOD; it now says the venue's currency.
 - Notes:
+  - The sweets shop raises no expired alerts, even in 90 days: the closing check wastes its cheese and dough on their expiry day, and its other goods keep for weeks or have no expiry. The café and the kitchen cover the expired path, which gate 2 checks across the three venues.
+  - The CLI's default stays at 30 days (D89): 3 × 90 days take about six minutes here.
 
 ### Task 6: the item setup API
 
@@ -224,3 +244,7 @@ Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: not yet.
 - 2026-11-17 12:20: PR #12 opened for D83, reviewed (two findings, one fixed, one declined).
 - 2026-11-17 12:27: PR #12 green (CI 1m47s) and squash-merged into run/week-2 as c22a57d.
 - 2026-11-17 12:28: run/week-2 merged into feat/sim-week2 (conflicts in decisions.md and the run log only); task 4 resumes.
+- 2026-11-17 about 12:50: the session stopped after PR #13's review fixes were pushed, with CI green.
+- 2026-11-18 12:11: resumed in the same session after Yazan's "Try again" (model unchanged: Claude Opus 5.5). Postgres had exited (code 0) about 12 hours earlier; `docker compose up -d db` brought it back.
+- 2026-11-18 12:13: PR #13 squash-merged into run/week-2 as 6af1d9a (CI 1m40s).
+- 2026-11-18 12:14: task 5 started on feat/venues.

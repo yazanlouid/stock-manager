@@ -5,8 +5,9 @@
     uv run python -m app.cli reconcile
 
 reset recreates the schema (Alembic downgrade to base, then upgrade to head)
-after you type yes, then does what simulate does (D37). simulate seeds the café
-and simulates it into a migrated, empty database. reconcile checks every
+after you type yes, then does what simulate does (D37). simulate seeds the
+three demo venues (the café, the sweets shop and the cloud kitchen, D87) and
+simulates each into a migrated, empty database. reconcile checks every
 business's ledger and exits with 1 if it finds a problem. It prints each
 business's id, which API requests send in the X-Business-Id header.
 """
@@ -27,7 +28,6 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.domain.reconcile import reconcile
 from app.models import Business
-from app.sim.cafe import CAFE
 from app.sim.seed import seed
 from app.sim.simulator import (
     DEFAULT_RANDOM_SEED,
@@ -35,6 +35,7 @@ from app.sim.simulator import (
     SimulationSummary,
     simulate,
 )
+from app.sim.venues import VENUES
 
 API_DIR = Path(__file__).resolve().parents[1]
 
@@ -122,17 +123,21 @@ def recreate_schema() -> None:
 
 
 def _refuse_future_end_date(args: argparse.Namespace, session_factory: SessionFactory) -> bool:
-    """Print why and return True if --end-date is after today in the café's timezone (D82).
+    """Print why and return True if --end-date is after today in any venue's timezone (D82).
 
     simulate() refuses it too, but only once the business is seeded; checking
-    here first lets reset refuse before it erases anything.
+    here first lets reset refuse before it erases anything. The venue whose
+    clock is furthest behind decides, since its today is the earliest.
     """
     if args.end_date is None:
         return False
     with session_factory() as session:
-        today = session.scalar(
-            text("SELECT (now() AT TIME ZONE CAST(:timezone AS text))::date"),
-            {"timezone": CAFE.timezone},
+        today = min(
+            session.scalar(
+                text("SELECT (now() AT TIME ZONE CAST(:timezone AS text))::date"),
+                {"timezone": timezone},
+            )
+            for timezone in sorted({venue.timezone for venue in VENUES})
         )
     if args.end_date <= today:
         return False
@@ -152,24 +157,33 @@ def run_simulate(args: argparse.Namespace, session_factory: SessionFactory) -> i
             print("The database already has a business, so simulate won't add another.")
             print("Run reset to start again from an empty database.")
             return 1
-        business_id = seed(session, CAFE)
-        try:
-            summary = simulate(
-                session,
-                business_id,
-                venue=CAFE,
-                days=args.days,
-                end_date=args.end_date,
-                random_seed=args.random_seed,
-            )
-        except SimulationError as exc:
-            print(f"Simulation stopped: {exc}", file=sys.stderr)
-            print("Days before the failed one are committed.", file=sys.stderr)
-            return 1
-    print(f"Simulated {CAFE.name}.")
-    for line in format_summary(summary):
-        print(line)
-    print()
+        # One venue at a time, each in its own business, with the run's seed
+        # plus its position, so the café keeps the run's seed (D87). Each
+        # venue's days are committed as they go. Without --end-date, each
+        # ends today in its own timezone (D82), so for an hour each evening
+        # the kitchen in Dubai, an hour ahead of Amman, ends a day later.
+        for index, venue in enumerate(VENUES):
+            business_id = seed(session, venue)
+            try:
+                summary = simulate(
+                    session,
+                    business_id,
+                    venue=venue,
+                    days=args.days,
+                    end_date=args.end_date,
+                    random_seed=args.random_seed + index,
+                )
+            except SimulationError as exc:
+                print(f"Simulation of {venue.name} stopped: {exc}", file=sys.stderr)
+                print(
+                    "Days before the failed one, and any venue before it, are committed.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"Simulated {venue.name}.")
+            for line in format_summary(summary):
+                print(line)
+            print()
     return run_reconcile(session_factory)
 
 
