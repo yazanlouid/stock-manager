@@ -1,8 +1,13 @@
-"""Seed a venue's business, location, users and catalogue.
+"""Seed a venue's business, location, users, catalogue and par levels.
 
 It writes with the ORM and flushes, so ids exist, but never writes stock and
 never commits: the caller owns the transaction (hard rule 3). Stock comes from
 the simulator, through the domain functions.
+
+The par levels are written as rows, without evaluating the alerts and draft
+orders that follow from them (D59, D67). The simulator's first step is a sweep
+at the start of day 0, which evaluates every item, so they take effect there
+(D76). Between seed and that sweep, reconcile would report them as missing.
 """
 
 from decimal import Decimal
@@ -10,8 +15,18 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.models import Business, Item, ItemUnit, Location, Supplier, SupplierItem, User
-from app.sim.cafe import CAFE, Venue
+from app.models import (
+    Business,
+    Item,
+    ItemUnit,
+    Location,
+    ParLevel,
+    Supplier,
+    SupplierItem,
+    User,
+)
+from app.sim.cafe import CAFE
+from app.sim.venue import Venue
 
 # Starts with "!", which no password hash format produces, so nobody can log in
 # with it. Demo login replaces it later.
@@ -25,9 +40,8 @@ def seed(session: Session, venue: Venue = CAFE) -> UUID:
     session.flush()
     business_id = business.id
 
-    session.add(
-        Location(business_id=business_id, name=venue.location_name, kind=venue.location_kind)
-    )
+    location = Location(business_id=business_id, name=venue.location_name, kind=venue.location_kind)
+    session.add(location)
     for user in venue.users:
         session.add(
             User(
@@ -77,6 +91,16 @@ def seed(session: Session, venue: Venue = CAFE) -> UUID:
                 item_unit_id=unit.id,
                 pack_price=spec.pack_price,
                 is_preferred=True,
+            )
+        )
+        session.add(
+            ParLevel(
+                business_id=business_id,
+                location_id=location.id,
+                item_id=item.id,
+                low_stock_level=Decimal(spec.low_stock_level),
+                reorder_point=Decimal(spec.reorder_point),
+                order_up_to=Decimal(spec.order_up_to),
             )
         )
     session.flush()

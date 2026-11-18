@@ -23,7 +23,14 @@ from decimal import Context, Decimal, Inexact, InvalidOperation
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, PlainSerializer
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    PlainSerializer,
+    StrictInt,
+)
 
 # Traps instead of rounding: Inexact when a non-zero digit would be dropped,
 # InvalidOperation when the result needs more digits than the precision.
@@ -78,6 +85,8 @@ class ReceiptIn(RequestModel):
     supplier_id: UUID
     received_at: AwareDatetime
     invoice_ref: str | None = None
+    # The sent order this delivery is against, if any; the receipt closes it (D71).
+    po_id: UUID | None = None
     lines: list[ReceiptLineIn]
 
 
@@ -107,6 +116,71 @@ class ReversalIn(RequestModel):
     client_id: UUID
     # The client_id of the usage or waste request to reverse (D34).
     original_client_id: UUID
+
+
+class OrderLineIn(RequestModel):
+    # Whole packs, zero or more; null means "as suggested". Required, so a
+    # body that leaves it out isn't read as null. A JSON integer only: "4",
+    # 4.0 and true are refused.
+    qty_packs: StrictInt | None
+
+
+# --- Item setup requests (D90) --------------------------------------------------
+
+
+class UnitIn(RequestModel):
+    name: str
+    # Base units in one of this unit; it never changes afterwards (D91).
+    factor_to_base: Decimal
+
+
+class ItemIn(RequestModel):
+    sku: str
+    name: str
+    # g, ml or piece.
+    base_unit: str
+    category: str | None = None
+    tracks_batches: bool = False
+    # Only with tracks_batches: expiry dates are per batch.
+    tracks_expiry: bool = False
+    shelf_life_days: StrictInt | None = None
+    units: list[UnitIn] = []
+
+
+class ItemPatch(RequestModel):
+    """The fields to change; a field left out stays as it is. sku, name,
+    base_unit, the tracking flags and is_active can't be null (an explicit
+    null is a 422); category and shelf_life_days can, to clear them.
+    base_unit and tracking change only while the item has no movements."""
+
+    sku: str = None  # type: ignore[assignment]
+    name: str = None  # type: ignore[assignment]
+    category: str | None = None
+    shelf_life_days: StrictInt | None = None
+    is_active: bool = None  # type: ignore[assignment]
+    base_unit: str = None  # type: ignore[assignment]
+    tracks_batches: bool = None  # type: ignore[assignment]
+    tracks_expiry: bool = None  # type: ignore[assignment]
+
+
+class UnitPatch(RequestModel):
+    name: str
+
+
+class SupplierPriceIn(RequestModel):
+    supplier_id: UUID
+    item_unit_id: UUID
+    # Price of one pack of item_unit_id.
+    pack_price: Decimal
+    # True makes this the item's one preferred supplier price (D94).
+    is_preferred: bool = False
+
+
+class ParLevelIn(RequestModel):
+    # 0 <= low_stock_level <= reorder_point <= order_up_to, in base units.
+    low_stock_level: Decimal
+    reorder_point: Decimal
+    order_up_to: Decimal
 
 
 class CountBatchIn(RequestModel):
@@ -161,6 +235,8 @@ class ReceiptOut(ResponseModel):
     supplier_id: UUID
     received_at: Timestamp
     invoice_ref: str | None
+    # The order this delivery closed, if it was against one.
+    po_id: UUID | None
     created_at: Timestamp
 
 
@@ -248,6 +324,91 @@ class StockEntryOut(BaseModel):
     batches: list[StockBatchOut]
 
 
+# --- GET /alerts ---------------------------------------------------------------
+
+
+class AlertBatchOut(BaseModel):
+    """The batch an alert is about, with what it holds now."""
+
+    id: UUID
+    # True for a negative_stock alert, which is about the item's default batch.
+    is_default: bool
+    expires_on: date | None
+    lot_code: str | None
+    # The batch's balance now, in the item's base unit, not when the alert was raised.
+    on_hand: Quantity
+
+
+class AlertOut(BaseModel):
+    """One alert: an episode of low stock, of a batch expiring or expired, or
+    of a default batch below zero."""
+
+    id: UUID
+    # low_stock, expiring, expired or negative_stock.
+    type: str
+    # open or resolved.
+    status: str
+    # Business time: the write's occurred_at, or the time the sweep ran as of.
+    raised_at: Timestamp
+    resolved_at: Timestamp | None
+    location_id: UUID
+    location_name: str
+    item_id: UUID
+    sku: str
+    item_name: str
+    base_unit: str
+    # Null for low_stock, which is about the item at the location.
+    batch: AlertBatchOut | None
+
+
+# --- Orders --------------------------------------------------------------------
+
+
+class OrderLineOut(BaseModel):
+    """One item on an order, in whole packs of one of its units."""
+
+    id: UUID
+    item_id: UUID
+    sku: str
+    item_name: str
+    base_unit: str
+    item_unit_id: UUID
+    unit_name: str
+    # Base units in one pack.
+    factor_to_base: Quantity
+    # The rule's number: what brings the item back to order_up_to.
+    suggested_packs: int
+    # The owner's number; null on a draft line means "as suggested". On an
+    # order that was sent it is always set.
+    qty_packs: int | None
+    # What the line orders: qty_packs, or suggested_packs when that is null.
+    order_packs: int
+    # What the supplier charges for one pack now; null if they no longer
+    # list the item in this unit.
+    pack_price: Money | None
+
+
+class OrderOut(BaseModel):
+    """A purchase order: a draft the par-level rule keeps, or one that was sent."""
+
+    id: UUID
+    # draft, sent, received or cancelled.
+    status: str
+    location_id: UUID
+    location_name: str
+    supplier_id: UUID
+    supplier_name: str
+    # Business time; each is null until the order reaches that status.
+    sent_at: Timestamp | None
+    received_at: Timestamp | None
+    cancelled_at: Timestamp | None
+    created_at: Timestamp
+    # The delivery that closed a received order.
+    receipt_id: UUID | None
+    # By item SKU.
+    lines: list[OrderLineOut]
+
+
 # --- GET /catalogue ------------------------------------------------------------
 
 
@@ -308,3 +469,33 @@ class CatalogueOut(BaseModel):
     locations: list[LocationOut]
     suppliers: list[SupplierOut]
     items: list[CatalogueItemOut]
+
+
+# --- Item setup responses (D90) -------------------------------------------------
+
+
+class ItemSupplierPriceOut(SupplierPriceOut):
+    # For DELETE /items/{item_id}/supplier-prices/{id}.
+    id: UUID
+
+
+class ParLevelOut(ResponseModel):
+    location_id: UUID
+    low_stock_level: Quantity
+    reorder_point: Quantity
+    order_up_to: Quantity
+
+
+class ItemSetupOut(ResponseModel):
+    id: UUID
+    sku: str
+    name: str
+    category: str | None
+    base_unit: str
+    tracks_batches: bool
+    tracks_expiry: bool
+    shelf_life_days: int | None
+    is_active: bool
+    units: list[ItemUnitOut]
+    supplier_prices: list[ItemSupplierPriceOut]
+    par_levels: list[ParLevelOut]

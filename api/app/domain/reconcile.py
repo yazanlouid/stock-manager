@@ -10,8 +10,18 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.domain.alerts import check_alerts
+from app.domain.draft_lines import check_draft_lines
 from app.domain.stock import rebuild_balances
-from app.models import Batch, Item, ReceiptLine, StockCountLine, StockMovement
+from app.models import (
+    Batch,
+    Item,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    ReceiptLine,
+    StockCountLine,
+    StockMovement,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +29,9 @@ class Problem:
     """One way the ledger fails to reconcile.
 
     kind is one of balance_mismatch, negative_batch, default_batch_count,
-    receipt_line_unposted, receipt_line_mismatch, count_line_unposted or
-    count_line_mismatch.
+    receipt_line_unposted, receipt_line_mismatch, count_line_unposted,
+    count_line_mismatch, alert_missing, alert_not_due, draft_line_missing,
+    draft_line_not_due, draft_line_mismatch or order_line_without_quantity.
     """
 
     kind: str
@@ -35,6 +46,9 @@ def reconcile(session: Session, business_id: UUID) -> list[Problem]:
         *_default_batch_counts(session, business_id),
         *_receipt_line_problems(session, business_id),
         *_count_line_problems(session, business_id),
+        *_alert_problems(session, business_id),
+        *_draft_line_problems(session, business_id),
+        *_order_line_problems(session, business_id),
     ]
 
 
@@ -227,3 +241,112 @@ def _count_line_problems(session: Session, business_id: UUID) -> list[Problem]:
                 )
             )
     return problems
+
+
+def _alert_problems(session: Session, business_id: UUID) -> list[Problem]:
+    """The open alerts equal a fresh evaluation of every item's stock (D59).
+
+    Dates are judged as of the business's alerts date, the date of its last
+    sweep (D61), so this holds at any time of day, not only right after a
+    sweep. alert_missing is an alert that is due but not open; alert_not_due
+    is an open alert whose condition no longer holds.
+    """
+    differences = check_alerts(session, business_id)
+    if not differences:
+        return []
+    skus = dict(
+        session.execute(
+            select(Item.id, Item.sku).where(
+                Item.business_id == business_id,
+                Item.id.in_({d.key.item_id for d in differences}),
+            )
+        ).all()
+    )
+    batch_ids = [d.key.batch_id for d in differences if d.key.batch_id is not None]
+    labels = _batch_labels(session, business_id, batch_ids)
+
+    problems = []
+    for difference in differences:
+        key = difference.key
+        # A low_stock alert has no batch: it is about the item at the location.
+        what = skus[key.item_id] if key.batch_id is None else labels[key.batch_id]
+        alert = f"{key.type} alert for {what} at location {key.location_id}"
+        if difference.kind == "missing":
+            problems.append(Problem("alert_missing", f"{alert} is due but not open"))
+        else:
+            problems.append(Problem("alert_not_due", f"{alert} is open but no longer due"))
+    # check_alerts returns rows in no particular order; this keeps the report fixed.
+    return sorted(problems, key=lambda problem: (problem.kind, problem.message))
+
+
+def _draft_line_problems(session: Session, business_id: UUID) -> list[Problem]:
+    """Each supplier's draft holds exactly the lines that are due (domain rule 8, D67).
+
+    draft_line_missing is a line that is due but not on the draft;
+    draft_line_not_due is a line whose item is no longer due;
+    draft_line_mismatch is a line whose suggestion isn't what is due now.
+    """
+    differences = check_draft_lines(session, business_id)
+    if not differences:
+        return []
+    skus = dict(
+        session.execute(
+            select(Item.id, Item.sku).where(
+                Item.business_id == business_id,
+                Item.id.in_({d.item_id for d in differences}),
+            )
+        ).all()
+    )
+    problems = []
+    for d in differences:
+        line = (
+            f"draft line for {skus[d.item_id]} at location {d.location_id}"
+            f" from supplier {d.supplier_id}"
+        )
+        if d.kind == "missing":
+            message = f"{line} is due ({d.wanted_packs} packs) but missing"
+        elif d.kind == "not_due":
+            message = f"{line} suggests {d.line_packs} packs but is no longer due"
+        else:
+            message = f"{line} suggests {d.line_packs} packs but {d.wanted_packs} are due"
+        problems.append(Problem(f"draft_line_{d.kind}", message))
+    return problems
+
+
+def _order_line_problems(session: Session, business_id: UUID) -> list[Problem]:
+    """Every line of an order that was sent orders a whole number of packs above zero (D70).
+
+    Sending writes each line's final quantity and drops the lines that order
+    nothing, so a sent, received or cancelled order has no line without one.
+    """
+    rows = session.execute(
+        select(PurchaseOrderLine.id, PurchaseOrder.id, PurchaseOrder.status, Item.sku)
+        .join(
+            PurchaseOrder,
+            and_(
+                PurchaseOrder.business_id == PurchaseOrderLine.business_id,
+                PurchaseOrder.id == PurchaseOrderLine.po_id,
+            ),
+        )
+        .join(
+            Item,
+            and_(
+                Item.business_id == PurchaseOrderLine.business_id,
+                Item.id == PurchaseOrderLine.item_id,
+            ),
+        )
+        .where(
+            PurchaseOrderLine.business_id == business_id,
+            PurchaseOrder.status != "draft",
+            # IS NOT TRUE also catches a NULL quantity.
+            (PurchaseOrderLine.qty_packs > 0).is_not(True),
+        )
+        .order_by(PurchaseOrder.id, PurchaseOrderLine.id)
+    ).all()
+    return [
+        Problem(
+            "order_line_without_quantity",
+            f"line {line_id} ({sku}) of {status} order {order_id} has no quantity above zero",
+        )
+        for line_id, order_id, status, sku in rows
+    ]

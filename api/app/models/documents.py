@@ -32,6 +32,19 @@ class Receipt(Base):
         ForeignKeyConstraint(
             ["business_id", "supplier_id"], ["suppliers.business_id", "suppliers.id"]
         ),
+        # A receipt against an order is from that order's supplier, at its
+        # location (D71). Not checked when po_id is NULL. Named by hand: the
+        # convention's name is longer than Postgres's 63 characters.
+        ForeignKeyConstraint(
+            ["business_id", "po_id", "location_id", "supplier_id"],
+            [
+                "purchase_orders.business_id",
+                "purchase_orders.id",
+                "purchase_orders.location_id",
+                "purchase_orders.supplier_id",
+            ],
+            name="fk_receipts_purchase_order",
+        ),
         # One invoice can't be entered twice. NULLs are distinct (the Postgres
         # default), so any number of receipts can have no invoice number.
         UniqueConstraint("supplier_id", "invoice_ref"),
@@ -45,6 +58,8 @@ class Receipt(Base):
     # No default: the simulator replays past days, so the caller always sets it.
     received_at: Mapped[datetime]
     invoice_ref: Mapped[str | None]
+    # The order this delivery closes, if any. Unique: one receipt per order.
+    po_id: Mapped[uuid.UUID | None] = mapped_column(unique=True)
     created_at: Mapped[CreatedAt]
 
 

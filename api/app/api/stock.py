@@ -65,7 +65,10 @@ def replay_response(model: type) -> dict:
 def post_receipt(
     body: ReceiptIn, db: DbSession, business: CurrentBusiness, now: Now, response: Response
 ) -> ReceiptResponse:
-    """Record a delivery: one receive movement per line, plus any settle pairs."""
+    """Record a delivery: one receive movement per line, plus any settle pairs.
+
+    With po_id, the delivery is against a sent order and closes it (D71).
+    """
     check_not_future(body.received_at, now, "received_at")
     result = receive(
         db,
@@ -87,6 +90,7 @@ def post_receipt(
         ],
         client_id=body.client_id,
         source=SOURCE,
+        po_id=body.po_id,
     )
     set_status(response, result.replayed)
     return ReceiptResponse.model_validate(result)
