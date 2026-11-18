@@ -11,8 +11,9 @@ from decimal import Decimal, InvalidOperation
 
 from app.domain.errors import DomainError
 
-# numeric(14,3): three decimal places.
+# numeric(14,3): three decimal places, and eleven digits before the point.
 QUANTITY_STEP = Decimal("0.001")
+LARGEST = Decimal("99999999999.999")
 ZERO = Decimal(0)
 
 
@@ -22,6 +23,7 @@ def check_quantity(quantity: Decimal, name: str = "quantity") -> None:
     if quantity <= 0:
         raise DomainError(f"{name} must be positive, got {quantity}")
     _check_step(quantity, name)
+    _check_size(quantity, name)
 
 
 def check_money(amount: Decimal, name: str = "amount") -> None:
@@ -30,6 +32,7 @@ def check_money(amount: Decimal, name: str = "amount") -> None:
     if amount < 0:
         raise DomainError(f"{name} must not be negative, got {amount}")
     _check_step(amount, name)
+    _check_size(amount, name)
 
 
 def check_counted_quantity(quantity: Decimal, name: str = "counted_qty") -> None:
@@ -41,6 +44,7 @@ def check_counted_quantity(quantity: Decimal, name: str = "counted_qty") -> None
     if quantity < 0:
         raise DomainError(f"{name} must not be negative, got {quantity}")
     _check_step(quantity, name)
+    _check_size(quantity, name)
 
 
 def check_timestamp(value: datetime, name: str) -> None:
@@ -58,6 +62,13 @@ def _check_decimal(value: Decimal, name: str) -> None:
     # Decimal("Infinity") > 0 is True.
     if not value.is_finite():
         raise DomainError(f"{name} must be finite, got {value}")
+
+
+def _check_size(value: Decimal, name: str) -> None:
+    """Refuse a value its numeric(14,3) column can't hold, which Postgres would
+    reject with an error the API can only report as a 500."""
+    if abs(value) > LARGEST:
+        raise DomainError(f"{name} must be at most {LARGEST}, got {value}")
 
 
 def _check_step(value: Decimal, name: str) -> None:
