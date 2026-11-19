@@ -111,7 +111,9 @@ DEFAULT_RANDOM_SEED = 20261110
 SOURCE = "simulator"
 
 MILLE = Decimal(1000)
-MONEY_STEP = Decimal("0.001")
+# Drifted pack prices are rounded to the currency's minor unit (D101), so the
+# kitchen's dirham prices have two decimals; money is stored with three.
+CURRENCY_MINOR_UNIT = {"AED": Decimal("0.01"), "JOD": Decimal("0.001")}
 ZERO = Decimal(0)
 # The sweep runs first thing each day, before anything else is dated that day.
 SWEEP_TIME = time(0, 1)
@@ -386,6 +388,7 @@ class _Run:
         self.by_id = {item.id: item for item in self.items}
         # Current pack prices; they drift a little per delivery.
         self.prices: dict[str, Decimal] = {item.sku: item.pack_price for item in self.items}
+        self.price_step = CURRENCY_MINOR_UNIT[venue.currency]
         # Shrinkage (D78): base units of each item that have left without a movement.
         self.loss: dict[str, Decimal] = {item.sku: ZERO for item in self.items}
         # Deliveries and cancellations planned when an order was sent, each
@@ -665,12 +668,13 @@ class _Run:
         )
 
     def _drift_price(self, item: _Item) -> Decimal:
-        """A small random step from the last price, kept within the band around the seed price."""
+        """A small random step from the last price, kept within the band around the
+        seed price and rounded to the currency's minor unit (D101)."""
         step = item.supplier.spec.price_step_per_mille
         price = self.prices[item.sku] * (MILLE + self._draw(-step, step)) / MILLE
         band = item.pack_price * PRICE_BAND_PER_MILLE / MILLE
         price = min(max(price, item.pack_price - band), item.pack_price + band)
-        price = price.quantize(MONEY_STEP, ROUND_HALF_UP)
+        price = price.quantize(self.price_step, ROUND_HALF_UP)
         self.prices[item.sku] = price
         return price
 

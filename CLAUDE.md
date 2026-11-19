@@ -59,6 +59,7 @@ If a command stops matching the code, fix the code or update this section in the
 8. Timestamps are timestamptz. Primary keys default to Postgres 18's `uuidv7()`.
 9. No secrets in the repo. Config comes from `.env` (gitignored); `.env.example` is committed.
 10. A count is a barrier per item and location (D51): it must be dated at or after the item's latest movement there, and no write for that item there may then be dated at or before it. Counts post their differences as count_adjust movements, with source count from the API (D56). See domain rule 9 in `docs/schema.md`.
+11. Alerts and draft order lines are projections, like balances (D97). Only `app/domain/alerts.py` and `app/domain/draft_lines.py` write them, through `app/domain/rules.py`; order actions call `draft_lines.py` directly, since orders don't change alerts. Anything that changes what they depend on (a balance, a par level, an item's `is_active` or `shelf_life_days`, the preferred supplier or its pack unit, `expiry_warn_days`) re-evaluates the affected items in the same transaction. See domain rules 8 and 10 in `docs/schema.md`.
 
 ## Testing
 
