@@ -178,6 +178,25 @@ def test_gate_2_three_venues_reconcile_and_run_the_rules_on_their_own(db_session
     assert {path for path in required if paths[path] == 0} == set(), paths
 
 
+def test_the_kitchen_receipt_pack_prices_have_at_most_two_decimals(db_session: Session):
+    """D101: drifted pack prices are rounded to the currency's minor unit, the
+    fils for the kitchen's dirhams."""
+    business_id = seed(db_session, KITCHEN)
+    simulate(db_session, business_id, venue=KITCHEN, days=7, end_date=END_DATE)
+
+    prices = db_session.scalars(
+        select(ReceiptLine.pack_price).where(ReceiptLine.business_id == business_id)
+    ).all()
+    seeded = set(
+        db_session.scalars(
+            select(SupplierItem.pack_price).where(SupplierItem.business_id == business_id)
+        )
+    )
+    assert len(prices) > 50
+    assert set(prices) - seeded, "no price drifted"
+    assert [price for price in prices if price != price.quantize(Decimal("0.01"))] == []
+
+
 def assert_the_ledger_is_the_simulators(db: Session, business_id, summary) -> None:
     """Every movement is the simulator's, with no user, dated within the run,
     and the summary's counts agree with the ledger."""

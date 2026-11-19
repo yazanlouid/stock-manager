@@ -1,5 +1,7 @@
 # Run log: week 2 run (D58)
 
+Reviewed by Yazan on 18 Nov 2026; the For Yazan items are answered by D97–D101.
+
 Plan: docs/run-plan.md. Integration branch: run/week-2. Final PR: draft PR #17 from run/week-2 into main, https://github.com/yazanlouid/stock-manager/pull/17.
 
 ## Resume point
